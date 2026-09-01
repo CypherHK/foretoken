@@ -23,7 +23,7 @@ Install or upgrade the platform in local access mode:
 foretoken install
 ```
 
-The command reuses one compatible Prometheus instance or installs a CLI-managed monitoring stack when none exists. Use `--prometheus NAMESPACE/NAME` only when automatic discovery finds multiple compatible instances.
+The command reuses one compatible Prometheus instance or installs a CLI-managed monitoring stack when none exists. On NVIDIA GPU nodes it reuses one ready DCGM Exporter with a working ServiceMonitor, or installs a CLI-managed exporter when none exists. A shared Prometheus must select that ServiceMonitor. Duplicate, unhealthy, incomplete, or unmonitored exporters stop installation instead of being overlaid. The CLI never installs GPU drivers or device plugins. Use `--prometheus NAMESPACE/NAME` only when automatic discovery finds multiple compatible instances.
 
 Gateway mode can create a dedicated Gateway or reuse an existing one:
 
