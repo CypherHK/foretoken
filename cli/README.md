@@ -23,6 +23,8 @@ Install or upgrade the platform in local access mode:
 foretoken install
 ```
 
+The command reuses one compatible Prometheus instance or installs a CLI-managed monitoring stack when none exists. Use `--prometheus NAMESPACE/NAME` only when automatic discovery finds multiple compatible instances.
+
 Gateway mode can create a dedicated Gateway or reuse an existing one:
 
 ```bash
