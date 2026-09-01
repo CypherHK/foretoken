@@ -7,7 +7,7 @@ SPDX-FileCopyrightText: Copyright contributors to the Foretoken project
 
 [English](README.md) | 简体中文
 
-Foretoken CLI 通过统一的 `foretoken` 入口部署 Kustomize 配置、查看服务就绪状态、解析前端访问入口并运行评测。
+Foretoken CLI 通过统一的 `foretoken` 入口安装平台、部署 Kustomize 配置、查看服务就绪状态、解析前端访问入口并运行评测。
 
 使用 pip 或 uv 安装 Foretoken CLI：
 
@@ -16,6 +16,26 @@ pip install -e .
 # 或
 uv pip install -e .
 ```
+
+以本地访问模式安装或升级平台：
+
+```bash
+foretoken install
+```
+
+网关模式可以创建专用 Gateway，也可以复用已有 Gateway：
+
+```bash
+foretoken install --frontend-mode gateway --create-gateway
+
+foretoken install \
+  --frontend-mode gateway \
+  --gateway-name inference-gateway \
+  --gateway-namespace gateway-system \
+  --gateway-section-name https
+```
+
+使用 `--dry-run` 可在不修改集群的情况下验证并查看安装计划。重复使用 `--values` 可提供平台镜像、runtime 和硬件配置。原本由 Helm 直接安装的 release 继续使用原 Helm 生命周期，CLI 不会自动接管。
 
 部署一个 Kustomize 根目录中渲染出的前端服务和全部模型：
 
@@ -31,7 +51,13 @@ foretoken deploy examples/multi-model-quickstart
 foretoken delete examples/multi-model-quickstart
 ```
 
-该命令会等待删除完成，并忽略已经不存在的资源。
+该命令会等待删除完成，并忽略已经不存在的资源。删除全部 Foretoken 服务后，可以移除平台 release：
+
+```bash
+foretoken uninstall
+```
+
+该命令保留 Foretoken CRD，并在仍有用户服务时拒绝卸载。
 
 不应用配置，直接查看同一部署的状态：
 

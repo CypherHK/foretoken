@@ -35,16 +35,18 @@ Foretoken supports local and gateway access modes. Local mode exposes the fronte
 
 ### 1. Install Foretoken
 
+Install the CLI from the repository root:
+
+```bash
+pip install -e .
+# or
+uv pip install -e .
+```
+
 #### Local mode
 
 ```bash
-helm upgrade --install foretoken \
-  oci://ghcr.io/shiweijiezero/foretoken/charts/foretoken \
-  --namespace foretoken-platform \
-  --create-namespace \
-  --set frontend.enabled=true \
-  --set frontend.mode=local \
-  --wait
+foretoken install
 ```
 
 #### Gateway mode
@@ -66,55 +68,35 @@ helm upgrade --install envoy-gateway \
   --wait
 ```
 
-Then let the Foretoken Chart create a dedicated `GatewayClass` and `Gateway`:
+Create a dedicated `GatewayClass` and `Gateway` for Foretoken:
 
 ```bash
-helm upgrade --install foretoken \
-  oci://ghcr.io/shiweijiezero/foretoken/charts/foretoken \
-  --namespace foretoken-platform \
-  --create-namespace \
-  --set frontend.enabled=true \
-  --set frontend.mode=gateway \
-  --set frontend.gateway.create=true \
-  --wait
+foretoken install --frontend-mode gateway --create-gateway
 ```
 
-If the platform already has a suitable `Gateway`, first list its name and namespace:
+To reuse an existing Gateway, list its name and namespace:
 
 ```bash
 kubectl get gateway -A
 ```
 
-For example:
-
-```text
-NAMESPACE        NAME
-gateway-system   inference-gateway
-```
-
-To reuse this Gateway, install Foretoken with the complete command below:
+Then install Foretoken with that Gateway and listener:
 
 ```bash
-helm upgrade --install foretoken \
-  oci://ghcr.io/shiweijiezero/foretoken/charts/foretoken \
-  --namespace foretoken-platform \
-  --create-namespace \
-  --set frontend.enabled=true \
-  --set frontend.mode=gateway \
-  --set frontend.gateway.name=inference-gateway \
-  --set frontend.gateway.namespace=gateway-system \
-  --set frontend.gateway.sectionName=https \
-  --wait
+foretoken install \
+  --frontend-mode gateway \
+  --gateway-name inference-gateway \
+  --gateway-namespace gateway-system \
+  --gateway-section-name https
 ```
 
-`name` comes from the `NAME` column, `namespace` from `NAMESPACE`, and `sectionName` is the listener name selected from that Gateway. The Gateway must allow `HTTPRoute` resources from the frontend namespace; DNS and TLS remain owned by the platform Gateway.
+The Gateway must allow `HTTPRoute` resources from the frontend namespace; DNS and TLS remain owned by the platform Gateway.
 
 ### 2. Deploy the model service
 
-Install the Foretoken CLI from the repository root. `examples/quickstart` provides a ready-to-use frontend and single-model configuration. For two models with queue-based autoscaling, see [Multi-Model Quick Start](examples/multi-model-quickstart/README.md).
+`examples/quickstart` provides a ready-to-use frontend and single-model configuration. For two models with queue-based autoscaling, see [Multi-Model Quick Start](examples/multi-model-quickstart/README.md).
 
 ```bash
-pip install -e .
 foretoken deploy examples/quickstart
 ```
 
@@ -185,12 +167,10 @@ Delete the serving configuration so the Operator can stop the service and clean 
 foretoken delete examples/quickstart
 ```
 
-After the serving resources are gone, uninstall Foretoken:
+After the serving resources are gone, uninstall the platform:
 
 ```bash
-helm uninstall foretoken \
-  --namespace foretoken-platform \
-  --wait --timeout 5m
+foretoken uninstall
 ```
 
 A `GatewayClass` and `Gateway` created with `frontend.gateway.create=true` are removed with the Foretoken release; a reused platform Gateway is left unchanged.

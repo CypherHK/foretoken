@@ -169,13 +169,7 @@ pip install -e .
 使用发布镜像安装 Foretoken 并部署快速开始示例：
 
 ```bash
-helm upgrade --install foretoken \
-  oci://ghcr.io/shiweijiezero/foretoken/charts/foretoken \
-  --namespace foretoken-platform \
-  --create-namespace \
-  --set frontend.enabled=true \
-  --set frontend.mode=local \
-  --wait
+foretoken install
 
 foretoken deploy examples/quickstart --timeout 6m
 ```
@@ -205,14 +199,7 @@ helm upgrade --install envoy-gateway \
   --create-namespace \
   --wait
 
-helm upgrade --install foretoken \
-  oci://ghcr.io/shiweijiezero/foretoken/charts/foretoken \
-  --namespace foretoken-platform \
-  --create-namespace \
-  --set frontend.enabled=true \
-  --set frontend.mode=gateway \
-  --set frontend.gateway.create=true \
-  --wait
+foretoken install --frontend-mode gateway --create-gateway
 
 foretoken deploy examples/quickstart --timeout 6m
 ```

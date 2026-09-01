@@ -35,16 +35,18 @@ Foretoken 支持本地模式和网关模式。本地模式通过 `LoadBalancer` 
 
 ### 1. 安装 Foretoken
 
+从仓库根目录安装 CLI：
+
+```bash
+pip install -e .
+# 或
+uv pip install -e .
+```
+
 #### 本地模式
 
 ```bash
-helm upgrade --install foretoken \
-  oci://ghcr.io/shiweijiezero/foretoken/charts/foretoken \
-  --namespace foretoken-platform \
-  --create-namespace \
-  --set frontend.enabled=true \
-  --set frontend.mode=local \
-  --wait
+foretoken install
 ```
 
 #### 网关模式
@@ -66,55 +68,35 @@ helm upgrade --install envoy-gateway \
   --wait
 ```
 
-然后使用 Foretoken Chart 创建专用的 `GatewayClass` 和 `Gateway`：
+为 Foretoken 创建专用的 `GatewayClass` 和 `Gateway`：
 
 ```bash
-helm upgrade --install foretoken \
-  oci://ghcr.io/shiweijiezero/foretoken/charts/foretoken \
-  --namespace foretoken-platform \
-  --create-namespace \
-  --set frontend.enabled=true \
-  --set frontend.mode=gateway \
-  --set frontend.gateway.create=true \
-  --wait
+foretoken install --frontend-mode gateway --create-gateway
 ```
 
-如果平台已经有可用的 `Gateway`，可以先查看其名称和命名空间：
+如果复用已有 Gateway，先查看其名称和命名空间：
 
 ```bash
 kubectl get gateway -A
 ```
 
-例如输出：
-
-```text
-NAMESPACE        NAME
-gateway-system   inference-gateway
-```
-
-如果复用这个 Gateway，使用以下完整命令安装 Foretoken：
+然后使用该 Gateway 和 listener 安装 Foretoken：
 
 ```bash
-helm upgrade --install foretoken \
-  oci://ghcr.io/shiweijiezero/foretoken/charts/foretoken \
-  --namespace foretoken-platform \
-  --create-namespace \
-  --set frontend.enabled=true \
-  --set frontend.mode=gateway \
-  --set frontend.gateway.name=inference-gateway \
-  --set frontend.gateway.namespace=gateway-system \
-  --set frontend.gateway.sectionName=https \
-  --wait
+foretoken install \
+  --frontend-mode gateway \
+  --gateway-name inference-gateway \
+  --gateway-namespace gateway-system \
+  --gateway-section-name https
 ```
 
-其中 `name` 对应 `NAME` 列，`namespace` 对应 `NAMESPACE` 列，`sectionName` 是该 Gateway 中目标监听器的名称。该 Gateway 必须允许前端服务所在命名空间的 `HTTPRoute` 接入；DNS 和 TLS 继续由平台网关管理。
+该 Gateway 必须允许前端服务所在命名空间的 `HTTPRoute` 接入；DNS 和 TLS 继续由平台网关管理。
 
 ### 2. 部署模型服务
 
-先在仓库根目录安装 Foretoken CLI。`examples/quickstart` 提供一套可直接使用的前端服务和单模型配置。如需运行双模型并验证基于队列的自动扩缩容，请参阅[多模型快速开始](examples/multi-model-quickstart/README_zh.md)。
+`examples/quickstart` 提供一套可直接使用的前端服务和单模型配置。如需运行双模型并验证基于队列的自动扩缩容，请参阅[多模型快速开始](examples/multi-model-quickstart/README_zh.md)。
 
 ```bash
-pip install -e .
 foretoken deploy examples/quickstart
 ```
 
@@ -183,10 +165,8 @@ foretoken bench \
 # 删除服务配置，停止服务并清理所辖资源：
 foretoken delete examples/quickstart
 
-# 服务资源清理完成后，再卸载 Foretoken：
-helm uninstall foretoken \
-  --namespace foretoken-platform \
-  --wait --timeout 5m
+# 服务资源清理完成后，再卸载平台：
+foretoken uninstall
 ```
 
 通过 `frontend.gateway.create=true` 创建的 `GatewayClass` 和 `Gateway` 会随 Foretoken 的 Helm 发布实例一同删除；复用的平台网关不会被删除。

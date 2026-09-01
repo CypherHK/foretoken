@@ -7,7 +7,7 @@ SPDX-FileCopyrightText: Copyright contributors to the Foretoken project
 
 English | [简体中文](README_zh.md)
 
-The Foretoken CLI deploys Kustomize configurations, reports serving readiness, resolves frontend endpoints, and exposes the benchmark command through one `foretoken` entry point.
+The Foretoken CLI installs the platform, deploys Kustomize configurations, reports serving readiness, resolves frontend endpoints, and exposes benchmarks through one `foretoken` entry point.
 
 Install the Foretoken CLI with pip or uv:
 
@@ -16,6 +16,26 @@ pip install -e .
 # or
 uv pip install -e .
 ```
+
+Install or upgrade the platform in local access mode:
+
+```bash
+foretoken install
+```
+
+Gateway mode can create a dedicated Gateway or reuse an existing one:
+
+```bash
+foretoken install --frontend-mode gateway --create-gateway
+
+foretoken install \
+  --frontend-mode gateway \
+  --gateway-name inference-gateway \
+  --gateway-namespace gateway-system \
+  --gateway-section-name https
+```
+
+Use `--dry-run` to validate and show the installation plan without changing the cluster. Repeatable `--values` files provide platform image, runtime, and hardware settings. Releases originally installed directly with Helm remain under their existing Helm lifecycle and are not adopted automatically.
 
 Deploy one frontend and all models rendered by a Kustomize root:
 
@@ -31,7 +51,13 @@ Delete the resources rendered by the same configuration:
 foretoken delete examples/multi-model-quickstart
 ```
 
-The command waits for deletion and ignores resources that are already absent.
+The command waits for deletion and ignores resources that are already absent. After deleting all Foretoken services, remove the platform release:
+
+```bash
+foretoken uninstall
+```
+
+The command preserves Foretoken CRDs and refuses to uninstall while user-owned services remain.
 
 Inspect the same deployment without applying it:
 
