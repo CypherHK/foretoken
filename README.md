@@ -49,7 +49,7 @@ uv pip install -e .
 foretoken install
 ```
 
-The command also prepares Prometheus and, on NVIDIA GPU nodes, DCGM Exporter. Existing compatible components are reused; GPU drivers and device plugins remain platform-owned.
+The command also prepares Prometheus and, on NVIDIA GPU nodes, DCGM Exporter. On MetaX GPU nodes it verifies and reuses the platform's mxExporter. GPU drivers, device plugins, and vendor operators remain platform-owned.
 
 #### Gateway mode
 
