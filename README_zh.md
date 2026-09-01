@@ -35,21 +35,27 @@ Foretoken 支持本地模式和网关模式。本地模式通过 `LoadBalancer` 
 
 ### 1. 安装 Foretoken
 
-从仓库根目录安装 CLI：
+使用 pip 从仓库根目录安装 CLI：
 
 ```bash
 pip install -e .
-# 或
+```
+
+或使用 uv 安装：
+
+```bash
 uv pip install -e .
 ```
 
 #### 本地模式
 
+安装或升级 Foretoken，并使用本地访问模式：
+
 ```bash
 foretoken install
 ```
 
-该命令还会准备 Prometheus，并在 NVIDIA GPU 节点上准备 DCGM Exporter。在沐曦 GPU 节点上，命令会验证并复用平台已有的 mxExporter。GPU 驱动、device plugin 和厂商 Operator 继续由平台负责。
+该命令还会准备 Prometheus，并在 NVIDIA GPU 节点上准备 DCGM Exporter。在沐曦 GPU 节点上，命令会验证并复用平台已有的 mxExporter。GPU 驱动、device plugin 和厂商 Operator 继续由平台负责。如需安装当前源码，使用 `foretoken install -e .`；远程 Kubernetes context 还需要提供 `--registry`。
 
 #### 网关模式
 
@@ -138,10 +144,16 @@ curl --fail-with-body --no-buffer \
 
 ### 4. 评测服务吞吐
 
-在仓库根目录安装可选的评测依赖：
+使用 pip 从仓库根目录安装可选的评测依赖：
 
 ```bash
 pip install -e '.[bench]'
+```
+
+或使用 uv 安装：
+
+```bash
+uv pip install -e '.[bench]'
 ```
 
 以下命令会复用已经运行的快速开始服务；服务尚未部署时，CLI 会创建配置中的资源，并在评测结束后只清理本次创建的资源。未指定 `--prompt` 或 `--dataset` 时，使用一个简短的内置提示词：

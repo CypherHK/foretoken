@@ -20,10 +20,21 @@ Qwen 服务每 5 秒评估一次队列，以每个 Group 平均 1 个等待请�
 
 ## 部署
 
-先安装 Foretoken 平台，再从仓库根目录安装 CLI 并部署：
+先安装 Foretoken 平台，再使用 pip 从仓库根目录安装 CLI：
 
 ```bash
 pip install -e .
+```
+
+或使用 uv 安装：
+
+```bash
+uv pip install -e .
+```
+
+部署示例：
+
+```bash
 foretoken deploy examples/multi-model-quickstart
 ```
 

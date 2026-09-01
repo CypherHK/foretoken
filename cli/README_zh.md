@@ -9,11 +9,15 @@ SPDX-FileCopyrightText: Copyright contributors to the Foretoken project
 
 Foretoken CLI 通过统一的 `foretoken` 入口安装平台、部署 Kustomize 配置、查看服务就绪状态、解析前端访问入口并运行评测。
 
-使用 pip 或 uv 安装 Foretoken CLI：
+使用 pip 安装 Foretoken CLI：
 
 ```bash
 pip install -e .
-# 或
+```
+
+或使用 uv 安装：
+
+```bash
 uv pip install -e .
 ```
 
@@ -37,7 +41,21 @@ foretoken install \
   --gateway-section-name https
 ```
 
-使用 `--dry-run` 可在不修改集群的情况下验证并查看安装计划。重复使用 `--values` 可提供平台镜像、runtime 和硬件配置。原本由 Helm 直接安装的 release 继续使用原 Helm 生命周期，CLI 不会自动接管。
+使用同一套生命周期安装当前 Foretoken 源码：
+
+```bash
+foretoken install -e .
+```
+
+当前 context 是标准 kind 或 k3d 时，命令会构建并导入本地镜像；其他 Kubernetes context 需要提供节点可访问的 registry：
+
+```bash
+foretoken install -e . --registry ghcr.io/example/foretoken
+```
+
+私有 registry 还需要通过 `--values` 配置 `imagePullSecrets` 和 `workload.imagePullSecrets`，详见[从源码部署 Foretoken](../docs/custom-deployment_zh.md)。
+
+使用 `--dry-run` 可在不构建镜像、不修改集群的情况下验证并查看安装计划。重复使用 `--values` 可提供平台镜像、runtime 和硬件配置。release 与源码安装模式会记录在 Helm metadata 中，不能静默切换。原本由 Helm 直接安装的 release 继续使用原 Helm 生命周期，CLI 不会自动接管。
 
 部署一个 Kustomize 根目录中渲染出的前端服务和全部模型：
 
@@ -89,13 +107,21 @@ FORETOKEN_REQUEST_HOST="$(foretoken endpoint examples/quickstart --host)"
 
 Host 值在直接访问时是 URL authority，在 HTTP Gateway 模式下是配置的路由域名。该命令负责等待 LoadBalancer 或 Gateway 地址，服务就绪仍由 `foretoken deploy` 负责。
 
-评测能力使用可选依赖：
+使用 pip 安装可选的评测依赖：
 
 ```bash
 pip install -e '.[bench]'
-# 或
-uv pip install -e '.[bench]'
+```
 
+或使用 uv 安装：
+
+```bash
+uv pip install -e '.[bench]'
+```
+
+然后运行评测：
+
+```bash
 foretoken bench examples/quickstart
 ```
 

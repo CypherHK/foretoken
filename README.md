@@ -35,21 +35,27 @@ Foretoken supports local and gateway access modes. Local mode exposes the fronte
 
 ### 1. Install Foretoken
 
-Install the CLI from the repository root:
+Install the CLI from the repository root with pip:
 
 ```bash
 pip install -e .
-# or
+```
+
+Or use uv:
+
+```bash
 uv pip install -e .
 ```
 
 #### Local mode
 
+Install or upgrade Foretoken with direct local access:
+
 ```bash
 foretoken install
 ```
 
-The command also prepares Prometheus and, on NVIDIA GPU nodes, DCGM Exporter. On MetaX GPU nodes it verifies and reuses the platform's mxExporter. GPU drivers, device plugins, and vendor operators remain platform-owned.
+The command also prepares Prometheus and, on NVIDIA GPU nodes, DCGM Exporter. On MetaX GPU nodes it verifies and reuses the platform's mxExporter. GPU drivers, device plugins, and vendor operators remain platform-owned. To install the current source tree instead, run `foretoken install -e .`; remote Kubernetes contexts also require `--registry`.
 
 #### Gateway mode
 
@@ -138,10 +144,16 @@ When reusing a platform Gateway, use that Gateway's configured hostname, port, a
 
 ### 4. Benchmark service throughput
 
-Install the optional benchmark dependencies from the repository root:
+Install the optional benchmark dependencies from the repository root with pip:
 
 ```bash
 pip install -e '.[bench]'
+```
+
+Or use uv:
+
+```bash
+uv pip install -e '.[bench]'
 ```
 
 The benchmark command reuses an existing Quick Start service. If the service is absent, it deploys the configuration and removes only the resources it created after the benchmark. When neither `--prompt` nor `--dataset` is specified, it uses a short built-in prompt:

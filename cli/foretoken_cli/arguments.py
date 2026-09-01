@@ -18,6 +18,8 @@ class InstallCommand:
 
     namespace: str
     values: tuple[str, ...]
+    editable: str | None
+    registry: str | None
     prometheus: str | None
     frontend_mode: str | None
     create_gateway: bool
@@ -111,6 +113,17 @@ def _build_parser() -> argparse.ArgumentParser:
     install = subparsers.add_parser(
         "install",
         help="Install or upgrade the Foretoken platform",
+    )
+    install.add_argument(
+        "-e",
+        "--editable",
+        metavar="PATH",
+        help="build and install from this Foretoken source root",
+    )
+    install.add_argument(
+        "--registry",
+        metavar="REGISTRY",
+        help="registry used to distribute source images to remote clusters",
     )
     install.add_argument(
         "-f",
@@ -284,9 +297,13 @@ def parse_arguments(argv: Sequence[str]) -> ParsedCommand:
                 "gateway mode requires --create-gateway or both "
                 "--gateway-name and --gateway-namespace"
             )
+        if parsed_args.registry and not parsed_args.editable:
+            parser.error("--registry requires --editable PATH")
         return InstallCommand(
             parsed_args.namespace,
             tuple(parsed_args.values or ()),
+            parsed_args.editable,
+            parsed_args.registry,
             parsed_args.prometheus,
             parsed_args.frontend_mode,
             parsed_args.create_gateway,

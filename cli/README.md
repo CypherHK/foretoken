@@ -9,11 +9,15 @@ English | [简体中文](README_zh.md)
 
 The Foretoken CLI installs the platform, deploys Kustomize configurations, reports serving readiness, resolves frontend endpoints, and exposes benchmarks through one `foretoken` entry point.
 
-Install the Foretoken CLI with pip or uv:
+Install the Foretoken CLI with pip:
 
 ```bash
 pip install -e .
-# or
+```
+
+Or use uv:
+
+```bash
 uv pip install -e .
 ```
 
@@ -37,7 +41,21 @@ foretoken install \
   --gateway-section-name https
 ```
 
-Use `--dry-run` to validate and show the installation plan without changing the cluster. Repeatable `--values` files provide platform image, runtime, and hardware settings. Releases originally installed directly with Helm remain under their existing Helm lifecycle and are not adopted automatically.
+Install the current Foretoken source tree with the same lifecycle:
+
+```bash
+foretoken install -e .
+```
+
+A standard active kind or k3d context imports the built images locally. Other Kubernetes contexts require a registry reachable by their nodes:
+
+```bash
+foretoken install -e . --registry ghcr.io/example/foretoken
+```
+
+Private registries also require `imagePullSecrets` and `workload.imagePullSecrets` through `--values`; see [Deploy Foretoken from Source](../docs/custom-deployment.md).
+
+Use `--dry-run` to validate and show the installation plan without building or changing the cluster. Repeatable `--values` files provide platform image, runtime, and hardware settings. Release and source installs record their mode in Helm metadata and cannot switch silently. Releases originally installed directly with Helm remain under their existing Helm lifecycle and are not adopted automatically.
 
 Deploy one frontend and all models rendered by a Kustomize root:
 
@@ -89,13 +107,21 @@ FORETOKEN_REQUEST_HOST="$(foretoken endpoint examples/quickstart --host)"
 
 The host value is the URL authority for direct access or the configured routing hostname for an HTTP Gateway. The command waits for the LoadBalancer or Gateway address, but serving readiness remains owned by `foretoken deploy`.
 
-Benchmark support uses optional dependencies:
+Install the optional benchmark dependencies with pip:
 
 ```bash
 pip install -e '.[bench]'
-# or
-uv pip install -e '.[bench]'
+```
 
+Or use uv:
+
+```bash
+uv pip install -e '.[bench]'
+```
+
+Then run the benchmark:
+
+```bash
 foretoken bench examples/quickstart
 ```
 
