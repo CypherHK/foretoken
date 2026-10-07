@@ -26,7 +26,7 @@ use thiserror::Error;
 
 mod observations;
 pub(crate) mod workflow;
-use observations::{RequestObservation, Termination};
+use observations::{RequestObservation, Termination, observe_stream_drop};
 
 use workflow::execute_workflow;
 
@@ -87,6 +87,8 @@ pub struct Generated {
     pub routed: RoutedGenerate,
     pub tokenizer: DynTokenizer,
     pub decode_options: TextDecodeOptions,
+    // Only observed stop-string requests defer final labels until decoder usage is available.
+    pub(crate) decoder_output_tokens: Option<tokio::sync::oneshot::Sender<usize>>,
 }
 
 pub struct GeneratedChat {
@@ -618,6 +620,7 @@ impl RuntimeGeneration {
             routed,
             tokenizer: bundle.tokenizer.clone(),
             decode_options,
+            decoder_output_tokens: None,
         })
     }
 }
@@ -651,11 +654,34 @@ fn deadline_stream(
     mut stream: TokenStream,
     deadline: tokio::time::Instant,
     mut observation: Option<RequestObservation>,
-) -> TokenStream {
+    decode_options: &TextDecodeOptions,
+) -> (TokenStream, Option<tokio::sync::oneshot::Sender<usize>>) {
+    let observe_decoder = observation.is_some()
+        && decode_options
+            .stop_strings
+            .as_ref()
+            .is_some_and(|stops| !stops.is_empty());
     let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
     let (expiry_sender, expiry_receiver) = tokio::sync::oneshot::channel();
+    let output = Box::pin(async_stream::stream! {
+        while let Some(item) = receiver.recv().await { yield item; }
+        if expiry_receiver.await.is_ok() { yield Err(LlmFacadeError::RequestFailed); }
+    }) as TokenStream;
+    let (output, mut dropped) = if observe_decoder {
+        let (output, dropped) = observe_stream_drop(output);
+        (output, Some(dropped))
+    } else {
+        (output, None)
+    };
+    let (decoder_sender, decoder_receiver) = if observe_decoder {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        (Some(sender), Some(receiver))
+    } else {
+        (None, None)
+    };
     tokio::spawn(async move {
-        let termination = tokio::select! {
+        let mut backend_terminal_at = None;
+        let mut termination = tokio::select! {
             biased;
             _ = sender.closed() => Termination::ConsumerClosed,
             _ = tokio::time::sleep_until(deadline) => Termination::Timeout,
@@ -663,10 +689,12 @@ fn deadline_stream(
                 while let Some(item) = stream.next().await {
                     if let Some(observation) = observation.as_mut() { observation.item(&item); }
                     let terminal = Termination::from_item(&item);
-                    // The frontend has observed a terminal backend item. Record before a slow
-                    // HTTP consumer can stall terminal delivery; transport completion is separate.
                     if let (Some(observation), Some(terminal)) = (observation.as_mut(), terminal) {
-                        observation.finish(terminal);
+                        let at = Instant::now();
+                        backend_terminal_at = Some(at);
+                        // With stop strings, decoding may truncate even this terminal item.
+                        // Otherwise retain the original backend-stream E2E publication boundary.
+                        if !observe_decoder { observation.finish_at(terminal, at); }
                     }
                     if sender.send(item).await.is_err() { return Termination::ConsumerClosed; }
                     if let Some(terminal) = terminal { return terminal; }
@@ -674,21 +702,50 @@ fn deadline_stream(
                 Termination::Incomplete
             } => termination,
         };
-        // Release frontend reservations before publishing a cancelled/incomplete terminal row.
-        // Backend abort remains best-effort and is not proof that engine work has already stopped.
-        drop(stream);
-        if let Some(observation) = observation.as_mut() {
-            observation.finish(termination);
+        let mut stream_drop = dropped
+            .as_mut()
+            .and_then(|receiver| receiver.try_recv().ok());
+        // Release reservations before any terminal publication. Preserve a known stop cause for
+        // backend cleanup, without assuming that best-effort abort has stopped engine execution.
+        if let Some(info) = &stream_drop {
+            info.cause.drop_as(stream);
+        } else {
+            drop(stream);
         }
-        // Preserve the existing separate timeout slot: queued tokens precede the transport error.
+        let cleanup_at = Instant::now();
+        drop(sender);
+        // Close both transport channels before waiting for decoding, so ordinary EOF cannot deadlock.
         if matches!(termination, Termination::Timeout) {
             let _ = expiry_sender.send(());
+        } else {
+            drop(expiry_sender);
+        }
+        if let Some(decoder_receiver) = decoder_receiver {
+            let tokens = tokio::select! {
+                biased;
+                result = decoder_receiver => result.ok(),
+                _ = tokio::time::sleep_until(deadline) => None,
+            };
+            if stream_drop.is_none() {
+                stream_drop = dropped
+                    .as_mut()
+                    .and_then(|receiver| receiver.try_recv().ok());
+            }
+            if let (Some(observation), Some(tokens)) = (observation.as_mut(), tokens) {
+                observation.decoded_output_tokens(tokens);
+                if stream_drop.as_ref().is_some_and(|info| {
+                    info.cause == foretoken_engine_core_client::AbortCause::StopStringMatched
+                }) {
+                    termination = Termination::Completed("frontend_stop_string");
+                    backend_terminal_at = stream_drop.as_ref().map(|info| info.at);
+                }
+            }
+        }
+        if let Some(observation) = observation.as_mut() {
+            observation.finish_at(termination, backend_terminal_at.unwrap_or(cleanup_at));
         }
     });
-    Box::pin(async_stream::stream! {
-        while let Some(item) = receiver.recv().await { yield item; }
-        if expiry_receiver.await.is_ok() { yield Err(LlmFacadeError::RequestFailed); }
-    })
+    (output, decoder_sender)
 }
 
 #[async_trait]
@@ -769,7 +826,12 @@ impl Generation for RuntimeGeneration {
                 return Err(error);
             }
         };
-        generated.routed.stream = deadline_stream(generated.routed.stream, deadline, observation);
+        (generated.routed.stream, generated.decoder_output_tokens) = deadline_stream(
+            generated.routed.stream,
+            deadline,
+            observation,
+            &generated.decode_options,
+        );
         Ok(generated)
     }
 
@@ -832,8 +894,15 @@ impl Generation for RuntimeGeneration {
                 return Err(error);
             }
         };
-        chat.generated.routed.stream =
-            deadline_stream(chat.generated.routed.stream, deadline, observation);
+        (
+            chat.generated.routed.stream,
+            chat.generated.decoder_output_tokens,
+        ) = deadline_stream(
+            chat.generated.routed.stream,
+            deadline,
+            observation,
+            &chat.generated.decode_options,
+        );
         Ok(chat)
     }
 

@@ -128,7 +128,10 @@ and incomplete streams remain recorded; their censored durations are not valid E
 Frontend entry is the protocol handler's existing post-JSON timestamp. Termination is observed
 at the backend token stream, before HTTP/SSE delivery; client TTFT/E2E include further transport
 and decoding delay. Consumer disappearance has an unknown cause (disconnect, idle timeout or
-adapter stop), rather than a proven client-disconnect attribution. Video is outside this label path.
+adapter drop), rather than a proven client-disconnect attribution. Local stop-string matches are
+completed labels with the decoder's truncated token count; their E2E ends at decoder stream drop.
+For requests with stop strings, terminal publication waits for decoder usage within the request
+budget. Without a match, the E2E endpoint remains the backend terminal item. Video is outside this label path.
 
 A bounded worker writes JSONL outside routing locks. Queue overflow and write failures are
 counted; process shutdown drains accepted rows and logs the counts. A nonzero loss count

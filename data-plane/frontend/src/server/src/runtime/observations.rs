@@ -4,15 +4,64 @@
 //! Request-scoped frontend labels. One guard owns early failure, streaming and drop recording.
 
 use std::collections::BTreeMap;
+use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
+use std::task::{Context, Poll};
 use std::time::Instant;
 
-use foretoken_llm_facade::LlmFacadeError;
+use foretoken_engine_core_client::AbortCause;
+use foretoken_llm_facade::{LlmFacadeError, TokenStream};
 use foretoken_tracing::RequestObservations;
+use futures::Stream;
 use serde::Serialize;
+use tokio::sync::oneshot;
 use vllm_llm::{FinishReason, GenerateOutput};
 
 use super::GenerationError;
+
+/// A drop signal preserves the decoder's synchronous abort scope across the deadline task.
+pub(super) struct StreamDrop {
+    pub cause: AbortCause,
+    pub at: Instant,
+}
+
+struct ObservedTokenStream {
+    stream: TokenStream,
+    dropped: Option<oneshot::Sender<StreamDrop>>,
+}
+
+impl Stream for ObservedTokenStream {
+    type Item = Result<GenerateOutput, LlmFacadeError>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.stream.as_mut().poll_next(cx)
+    }
+}
+
+impl Drop for ObservedTokenStream {
+    fn drop(&mut self) {
+        if let Some(sender) = self.dropped.take() {
+            let _ = sender.send(StreamDrop {
+                cause: AbortCause::current(),
+                at: Instant::now(),
+            });
+        }
+    }
+}
+
+/// Wraps only observed stop-string streams; drop reads the upstream decoder's task-local cause.
+pub(super) fn observe_stream_drop(
+    stream: TokenStream,
+) -> (TokenStream, oneshot::Receiver<StreamDrop>) {
+    let (sender, receiver) = oneshot::channel();
+    (
+        Box::pin(ObservedTokenStream {
+            stream,
+            dropped: Some(sender),
+        }),
+        receiver,
+    )
+}
 
 /// Raw stream termination categories, without response text or backend error payloads.
 #[derive(Clone, Copy)]
@@ -59,23 +108,23 @@ struct FrontendObservation {
     event_type: &'static str,
     request_id: String,
     clock_domain: String,
-    status: &'static str,
-    termination_reason: Option<&'static str>,
+    frontend_status: &'static str,
+    frontend_termination_reason: Option<&'static str>,
     frontend_entry_offset_ms: Option<f64>,
     on_selected_offset_ms: Option<f64>,
-    first_backend_item_offset_ms: Option<f64>,
-    first_token_offset_ms: Option<f64>,
+    frontend_first_backend_item_offset_ms: Option<f64>,
+    frontend_first_token_offset_ms: Option<f64>,
     frontend_end_offset_ms: Option<f64>,
     frontend_ttft_ms: Option<f64>,
     frontend_e2e_ms: Option<f64>,
     frontend_tpot_ms: Option<f64>,
     frontend_ttft_available_offset_ms: Option<f64>,
     frontend_e2e_available_offset_ms: Option<f64>,
-    output_token_count: usize,
+    frontend_output_token_count: usize,
     // Post-hoc usage is exposed only in the final record, never as a routing feature.
-    prompt_token_count: Option<usize>,
-    cached_token_count: Option<usize>,
-    usage_available_offset_ms: Option<f64>,
+    frontend_usage_prompt_tokens: Option<usize>,
+    frontend_usage_cached_tokens: Option<usize>,
+    frontend_usage_available_offset_ms: Option<f64>,
     missing_fields: BTreeMap<&'static str, &'static str>,
 }
 
@@ -99,22 +148,22 @@ impl RequestObservation {
                 event_type: "frontend_terminal",
                 request_id: id,
                 clock_domain: sink.clock_domain().to_owned(),
-                status: "streaming",
-                termination_reason: None,
+                frontend_status: "streaming",
+                frontend_termination_reason: None,
                 frontend_entry_offset_ms: entry_ms,
                 on_selected_offset_ms: None,
-                first_backend_item_offset_ms: None,
-                first_token_offset_ms: None,
+                frontend_first_backend_item_offset_ms: None,
+                frontend_first_token_offset_ms: None,
                 frontend_end_offset_ms: None,
                 frontend_ttft_ms: None,
                 frontend_e2e_ms: None,
                 frontend_tpot_ms: None,
                 frontend_ttft_available_offset_ms: None,
                 frontend_e2e_available_offset_ms: None,
-                output_token_count: 0,
-                prompt_token_count: None,
-                cached_token_count: None,
-                usage_available_offset_ms: None,
+                frontend_output_token_count: 0,
+                frontend_usage_prompt_tokens: None,
+                frontend_usage_cached_tokens: None,
+                frontend_usage_available_offset_ms: None,
                 missing_fields: BTreeMap::new(),
             },
             sink,
@@ -146,7 +195,9 @@ impl RequestObservation {
             .sink
             .offset_ms(Instant::now())
             .expect("origin precedes output");
-        self.row.first_backend_item_offset_ms.get_or_insert(at);
+        self.row
+            .frontend_first_backend_item_offset_ms
+            .get_or_insert(at);
         if let Ok(output) = item {
             if let Some(ids) = output.prompt_token_ids() {
                 self.prompt_tokens = Some(ids.len());
@@ -156,9 +207,9 @@ impl RequestObservation {
                     .unwrap_or(0)
                     .max(output.cached_token_count),
             );
-            self.row.output_token_count += output.token_ids.len();
-            if !output.token_ids.is_empty() && self.row.first_token_offset_ms.is_none() {
-                self.row.first_token_offset_ms = Some(at);
+            self.row.frontend_output_token_count += output.token_ids.len();
+            if !output.token_ids.is_empty() && self.row.frontend_first_token_offset_ms.is_none() {
+                self.row.frontend_first_token_offset_ms = Some(at);
                 self.row.frontend_ttft_ms =
                     self.row.frontend_entry_offset_ms.map(|entry| at - entry);
                 self.refresh_selection();
@@ -168,6 +219,11 @@ impl RequestObservation {
                 self.sink.record(&self.row);
             }
         }
+    }
+
+    /// Replaces provisional raw counts with the upstream decoder's terminal usage.
+    pub(super) fn decoded_output_tokens(&mut self, tokens: usize) {
+        self.row.frontend_output_token_count = tokens;
     }
 
     /// Records a pre-stream failure with its existing stable category; no payload is logged.
@@ -187,6 +243,11 @@ impl RequestObservation {
 
     /// Finishes exactly once. Failed/cancelled durations remain censored, not valid E2E targets.
     pub(super) fn finish(&mut self, termination: Termination) {
+        self.finish_at(termination, Instant::now());
+    }
+
+    /// Uses the observed backend terminal or decoder drop time, rather than later task wakeup.
+    pub(super) fn finish_at(&mut self, termination: Termination, ended_at: Instant) {
         if self.finished {
             return;
         }
@@ -194,28 +255,30 @@ impl RequestObservation {
         self.refresh_selection();
         let at = self
             .sink
-            .offset_ms(Instant::now())
+            .offset_ms(ended_at)
             .expect("origin precedes termination");
-        let (status, reason) = termination.status_reason();
+        let (frontend_status, reason) = termination.status_reason();
         self.row.event_type = "frontend_terminal";
-        self.row.status = status;
-        self.row.termination_reason = Some(reason);
+        self.row.frontend_status = frontend_status;
+        self.row.frontend_termination_reason = Some(reason);
         self.row.frontend_end_offset_ms = Some(at);
-        if status == "completed" {
+        if frontend_status == "completed" {
             self.row.frontend_e2e_ms = self.row.frontend_entry_offset_ms.map(|entry| at - entry);
             self.row.frontend_e2e_available_offset_ms = self.sink.offset_ms(Instant::now());
-            if self.row.output_token_count > 1 {
+            if self.row.frontend_output_token_count > 1 {
                 self.row.frontend_tpot_ms = self
                     .row
                     .frontend_e2e_ms
                     .zip(self.row.frontend_ttft_ms)
-                    .map(|(e2e, ttft)| (e2e - ttft) / (self.row.output_token_count - 1) as f64);
+                    .map(|(e2e, ttft)| {
+                        (e2e - ttft) / (self.row.frontend_output_token_count - 1) as f64
+                    });
             }
         }
         if self.cached_tokens.is_some() {
-            self.row.prompt_token_count = self.prompt_tokens;
-            self.row.cached_token_count = self.cached_tokens;
-            self.row.usage_available_offset_ms = self.sink.offset_ms(Instant::now());
+            self.row.frontend_usage_prompt_tokens = self.prompt_tokens;
+            self.row.frontend_usage_cached_tokens = self.cached_tokens;
+            self.row.frontend_usage_available_offset_ms = self.sink.offset_ms(Instant::now());
         }
         self.refresh_missing_fields();
         self.sink.record(&self.row);
@@ -240,13 +303,13 @@ impl RequestObservation {
                 "no_observed_router_selection",
             ),
             (
-                "first_backend_item_offset_ms",
-                self.row.first_backend_item_offset_ms.is_none(),
+                "frontend_first_backend_item_offset_ms",
+                self.row.frontend_first_backend_item_offset_ms.is_none(),
                 "no_backend_item",
             ),
             (
-                "first_token_offset_ms",
-                self.row.first_token_offset_ms.is_none(),
+                "frontend_first_token_offset_ms",
+                self.row.frontend_first_token_offset_ms.is_none(),
                 "no_nonempty_token_item",
             ),
             (
@@ -262,7 +325,11 @@ impl RequestObservation {
             (
                 "frontend_e2e_ms",
                 self.row.frontend_e2e_ms.is_none(),
-                "incomplete_or_missing_entry",
+                if self.row.frontend_status == "completed" {
+                    "entry_unavailable"
+                } else {
+                    "not_completed"
+                },
             ),
             (
                 "frontend_e2e_available_offset_ms",
@@ -275,18 +342,18 @@ impl RequestObservation {
                 "requires_complete_ttft_e2e_and_more_than_one_token",
             ),
             (
-                "prompt_token_count",
-                self.row.prompt_token_count.is_none(),
+                "frontend_usage_prompt_tokens",
+                self.row.frontend_usage_prompt_tokens.is_none(),
                 "no_backend_usage",
             ),
             (
-                "cached_token_count",
-                self.row.cached_token_count.is_none(),
+                "frontend_usage_cached_tokens",
+                self.row.frontend_usage_cached_tokens.is_none(),
                 "no_backend_usage",
             ),
             (
-                "usage_available_offset_ms",
-                self.row.usage_available_offset_ms.is_none(),
+                "frontend_usage_available_offset_ms",
+                self.row.frontend_usage_available_offset_ms.is_none(),
                 "no_backend_usage",
             ),
         ] {

@@ -75,6 +75,14 @@ impl LlmFacade for StubBackend {
         Ok(Box::pin(async_stream::stream! {
             yield Ok(output(&request, true, &[], None));
             tokio::time::sleep(Duration::from_millis(8)).await;
+            if mode == 11 || mode == 12 {
+                // The decoder must count only [a,b] after matching b inside a three-token batch.
+                // Cover both an unfinished backend and a match inside its terminal item.
+                yield Ok(output(&request, false, &[1, 2, 3],
+                    (mode == 12).then_some(FinishReason::Length)));
+                if mode == 11 { std::future::pending::<()>().await; }
+                return;
+            }
             if mode == 10 {
                 yield Ok(output(&request, false, &[], Some(FinishReason::Length)));
                 return;
@@ -131,12 +139,12 @@ fn runtime(
         json!({"version":"1.0","truncation":null,"padding":null,
         "added_tokens":[],"normalizer":null,"pre_tokenizer":{"type":"Whitespace"},
         "post_processor":null,"decoder":null,"model":{"type":"WordLevel","unk_token":"[UNK]",
-        "vocab":{"[UNK]":0,"a":1,"b":2,"c":3,"d":4,"e":5,"f":6,"g":7,"h":8,"i":9,"j":10}}})
+        "vocab":{"[UNK]":0,"a":1,"b":2,"c":3,"d":4,"e":5,"f":6,"g":7,"h":8,"i":9,"j":10,"k":11,"l":12}}})
         .to_string(),
     )
     .unwrap();
     let config = dir.join("config.json");
-    std::fs::write(&config, r#"{"model_type":"gpt2","vocab_size":11}"#).unwrap();
+    std::fs::write(&config, r#"{"model_type":"gpt2","vocab_size":13}"#).unwrap();
     let tokenizer_config = dir.join("tokenizer_config.json");
     std::fs::write(
         &tokenizer_config,
@@ -293,14 +301,24 @@ async fn frontend_labels_pair_with_loopback_client_and_retain_incomplete_request
         .build()
         .unwrap();
     let mut client_rows = Vec::new();
-    for index in 0..24 {
-        let mode = if index % 2 == 0 { 1 } else { 2 };
+    for index in 0..27 {
+        let mode = match index {
+            24 => 11,
+            25 => 12,
+            26 => 1,
+            _ if index % 2 == 0 => 1,
+            _ => 2,
+        };
+        let mut body = json!({
+            "model":"fixture","prompt":[mode,mode,mode,mode],"max_tokens":4,"stream":true,
+            "stream_options":{"include_usage":true}});
+        if index >= 24 {
+            body["stop"] = json!(if index == 26 { "z" } else { "b" });
+        }
         let started = Instant::now();
         let response = client
             .post(format!("http://{address}/v1/completions"))
-            .json(&json!({
-            "model":"fixture","prompt":[mode,mode,mode,mode],"max_tokens":4,"stream":true,
-            "stream_options":{"include_usage":true}}))
+            .json(&body)
             .send()
             .await
             .unwrap();
@@ -310,6 +328,7 @@ async fn frontend_labels_pair_with_loopback_client_and_retain_incomplete_request
         let mut id = None;
         let mut first_content = None;
         let mut usage = None;
+        let mut finish_reason = None;
         while let Some(chunk) = bytes.next().await {
             pending.push_str(std::str::from_utf8(&chunk.unwrap()).unwrap());
             while let Some(end) = pending.find("\n\n") {
@@ -320,6 +339,9 @@ async fn frontend_labels_pair_with_loopback_client_and_retain_incomplete_request
                     }
                     let payload: Value = serde_json::from_str(line).unwrap();
                     assert!(payload.get("error").is_none());
+                    if let Some(reason) = payload["choices"][0]["finish_reason"].as_str() {
+                        finish_reason = Some(reason.to_owned());
+                    }
                     if let Some(value) = payload["id"].as_str() {
                         if let Some(id) = &id {
                             assert_eq!(id, value);
@@ -343,7 +365,9 @@ async fn frontend_labels_pair_with_loopback_client_and_retain_incomplete_request
         }
         client_rows.push(json!({"request_id":id.unwrap(),"call_start_offset_ms":sink.offset_ms(started).unwrap(),
             "client_ttft_ms":first_content.unwrap(),"client_e2e_ms":started.elapsed().as_secs_f64()*1000.0,
-            "expected_output_tokens":if mode==1 {3} else {1},"usage":usage.unwrap()}));
+            "expected_output_tokens":if mode==11 || mode==12 {2} else if mode==1 {3} else {1},
+            "stop_string_case":match index {24=>Some("early_multi_token_match"),25=>Some("terminal_item_match"),26=>Some("nonmatching_stop_string"),_=>None},
+            "finish_reason":finish_reason.unwrap(),"usage":usage.unwrap()}));
     }
     // These controls use known generation IDs, including cases with no HTTP response identity.
     let mut controls = Vec::new();
@@ -400,21 +424,30 @@ async fn frontend_labels_pair_with_loopback_client_and_retain_incomplete_request
             .into_iter()
             .find(|row| row["request_id"] == id && row["event_type"] == "frontend_terminal")
             .unwrap();
-        let expected = match mode {
-            3 | 7 => "error",
-            4 => "incomplete",
-            5 | 8 => "timeout",
-            6 | 9 => "cancelled",
-            10 => "completed",
+        let (expected_status, expected_reason, has_ttft) = match mode {
+            3 => ("error", "backend_stream_error", true),
+            4 => ("incomplete", "backend_closed_without_terminal", true),
+            5 => ("timeout", "request_deadline", true),
+            6 => ("cancelled", "consumer_closed_cause_unknown", true),
+            7 => ("error", "request_failed", false),
+            8 => ("timeout", "request_deadline", false),
+            9 => ("cancelled", "backend_abort", true),
+            10 => ("completed", "backend_length", false),
             _ => unreachable!(),
         };
-        assert_eq!(row["status"], expected);
+        assert_eq!(row["frontend_status"], expected_status);
+        assert_eq!(row["frontend_termination_reason"], expected_reason);
+        assert_eq!(row["frontend_ttft_ms"].is_number(), has_ttft);
+        assert_eq!(row["frontend_ttft_ms"].is_null(), !has_ttft);
+        assert_eq!(row["frontend_first_token_offset_ms"].is_number(), has_ttft);
         if mode != 10 {
             assert!(row["frontend_e2e_ms"].is_null());
             assert!(row["frontend_tpot_ms"].is_null());
         }
-        if mode == 7 || mode == 8 || mode == 10 {
-            assert!(row["frontend_ttft_ms"].is_null());
+        if mode == 10 {
+            assert!(row["frontend_e2e_ms"].is_number());
+            assert_eq!(row["frontend_output_token_count"], 0);
+            assert!(row["frontend_tpot_ms"].is_null());
         }
         controls.push(row);
     }
@@ -427,8 +460,30 @@ async fn frontend_labels_pair_with_loopback_client_and_retain_incomplete_request
         rows.iter()
             .filter(|row| row["event_type"] == "frontend_terminal")
             .count(),
-        33
+        36
     );
+    // Old ambiguous keys must be absent from both serialized fields and missing-field reasons.
+    for row in rows
+        .iter()
+        .filter(|row| row["event_type"] != "router_selected")
+    {
+        for old in [
+            "status",
+            "termination_reason",
+            "first_backend_item_offset_ms",
+            "first_token_offset_ms",
+            "output_token_count",
+            "prompt_token_count",
+            "cached_token_count",
+            "usage_available_offset_ms",
+        ] {
+            assert!(row.get(old).is_none(), "old label key: {old}");
+            assert!(
+                row["missing_fields"].get(old).is_none(),
+                "old missing-field key: {old}"
+            );
+        }
+    }
     for row in rows
         .iter()
         .filter(|row| row["event_type"] == "router_selected")
@@ -467,31 +522,55 @@ async fn frontend_labels_pair_with_loopback_client_and_retain_incomplete_request
             final_row["on_selected_offset_ms"],
             selected["on_selected_offset_ms"]
         );
-        assert_eq!(final_row["status"], "completed");
+        assert_eq!(final_row["frontend_status"], "completed");
+        let matched_stop = matches!(
+            client_row["stop_string_case"].as_str(),
+            Some("early_multi_token_match" | "terminal_item_match")
+        );
         assert_eq!(
-            final_row["output_token_count"],
+            final_row["frontend_termination_reason"],
+            if matched_stop {
+                "frontend_stop_string"
+            } else {
+                "backend_length"
+            }
+        );
+        assert_eq!(
+            client_row["finish_reason"],
+            if matched_stop { "stop" } else { "length" }
+        );
+        if matched_stop {
+            assert_eq!(final_row["frontend_output_token_count"], 2); // Full backend item has three IDs.
+            assert!(final_row["frontend_e2e_ms"].is_number());
+        }
+        assert_eq!(
+            final_row["frontend_output_token_count"],
             client_row["expected_output_tokens"]
         );
-        assert_eq!(final_row["prompt_token_count"], 4);
-        assert_eq!(final_row["cached_token_count"], 2);
+        assert_eq!(final_row["frontend_usage_prompt_tokens"], 4);
+        assert_eq!(final_row["frontend_usage_cached_tokens"], 2);
         assert_eq!(
             client_row["usage"]["completion_tokens"],
-            final_row["output_token_count"]
+            final_row["frontend_output_token_count"]
         );
         assert_eq!(
             client_row["usage"]["prompt_tokens"],
-            final_row["prompt_token_count"]
+            final_row["frontend_usage_prompt_tokens"]
         );
         assert_eq!(
             client_row["usage"]["prompt_tokens_details"]["cached_tokens"],
-            final_row["cached_token_count"]
+            final_row["frontend_usage_cached_tokens"]
         );
         let times = [
             client_row["call_start_offset_ms"].as_f64().unwrap(),
             final_row["frontend_entry_offset_ms"].as_f64().unwrap(),
             final_row["on_selected_offset_ms"].as_f64().unwrap(),
-            final_row["first_backend_item_offset_ms"].as_f64().unwrap(),
-            final_row["first_token_offset_ms"].as_f64().unwrap(),
+            final_row["frontend_first_backend_item_offset_ms"]
+                .as_f64()
+                .unwrap(),
+            final_row["frontend_first_token_offset_ms"]
+                .as_f64()
+                .unwrap(),
             final_row["frontend_end_offset_ms"].as_f64().unwrap(),
         ];
         assert!(times.windows(2).all(|pair| pair[0] <= pair[1]));
@@ -511,27 +590,35 @@ async fn frontend_labels_pair_with_loopback_client_and_retain_incomplete_request
                 >= times[5]
         );
         assert!(early["frontend_e2e_ms"].is_null());
-        assert!(early["prompt_token_count"].is_null());
+        assert!(early["frontend_usage_prompt_tokens"].is_null());
         if client_row["expected_output_tokens"] == 1 {
             assert!(final_row["frontend_tpot_ms"].is_null());
         } else {
             assert!(
-                (final_row["frontend_tpot_ms"].as_f64().unwrap() - (e2e - ttft) / 2.0).abs() < 1e-9
+                (final_row["frontend_tpot_ms"].as_f64().unwrap()
+                    - (e2e - ttft)
+                        / (client_row["expected_output_tokens"].as_u64().unwrap() - 1) as f64)
+                    .abs()
+                    < 1e-9
             );
         }
         let difference = client_row["client_ttft_ms"].as_f64().unwrap() - ttft;
         let e2e_difference = client_row["client_e2e_ms"].as_f64().unwrap() - e2e;
-        differences.push(difference);
-        e2e_differences.push(e2e_difference);
+        if client_row["stop_string_case"].is_null() {
+            differences.push(difference);
+            e2e_differences.push(e2e_difference);
+        }
         paired.push(json!({"request_id":id,"client_ttft_ms":client_row["client_ttft_ms"],"frontend_ttft_ms":ttft,
             "client_minus_frontend_ttft_ms":difference,"client_e2e_ms":client_row["client_e2e_ms"],"frontend_e2e_ms":e2e,
-            "client_minus_frontend_e2e_ms":e2e_difference,"output_token_count":final_row["output_token_count"]}));
+            "client_minus_frontend_e2e_ms":e2e_difference,"frontend_output_token_count":final_row["frontend_output_token_count"],
+            "frontend_termination_reason":final_row["frontend_termination_reason"],
+            "stop_string_case":client_row["stop_string_case"],"client_finish_reason":client_row["finish_reason"]}));
     }
-    let summary = json!({"fixture":"cpu-loopback-http-with-stub-backend","normal_http_requests":24,"paired":paired.len(),
-        "pair_rate":paired.len() as f64/24.0,"ttft_difference_ms":{"definition":"client minus frontend","min":percentile(&differences,0.0),
+    let summary = json!({"fixture":"cpu-loopback-http-with-stub-backend","normal_http_requests":27,"http_requests_without_stop_strings":24,"stop_string_http_requests":3,"paired":paired.len(),
+        "pair_rate":paired.len() as f64/27.0,"ttft_difference_ms":{"definition":"client minus frontend","min":percentile(&differences,0.0),
         "p50":percentile(&differences,0.5),"p95":percentile(&differences,0.95),"max":percentile(&differences,1.0)},
         "e2e_difference_ms":{"min":percentile(&e2e_differences,0.0),"p50":percentile(&e2e_differences,0.5),"p95":percentile(&e2e_differences,0.95),"max":percentile(&e2e_differences,1.0)},
-        "early_ttft_visible_before_termination":true,"pending_dispatch_input_tokens_verified":4,"terminal_requests":33,"controls":controls,"pairs":paired,"writer":counts,
+        "early_ttft_visible_before_termination":true,"pending_dispatch_input_tokens_verified":4,"terminal_requests":36,"controls":controls,"pairs":paired,"writer":counts,
         "clock_basis":"client and frontend run in one CPU process, share std::time::Instant and writer origin; no cross-process conversion tested"});
     if let Some(path) = std::env::var_os("FORETOKEN_T2_FIXTURE_OUTPUT") {
         use std::io::Write;
@@ -543,7 +630,7 @@ async fn frontend_labels_pair_with_loopback_client_and_retain_incomplete_request
         writeln!(file, "{}", serde_json::to_string_pretty(&summary).unwrap()).unwrap();
     }
     println!(
-        "T2_FIXTURE paired=24/24, TTFT differences {}",
+        "T2_FIXTURE paired=27/27, TTFT differences {}",
         summary["ttft_difference_ms"]
     );
 }

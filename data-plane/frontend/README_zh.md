@@ -120,7 +120,9 @@ curl --fail-with-body "$FRONTEND_URL/v1/videos" \
 同一开关还记录 frontend 首非空 token 的 TTFT、正常 backend terminal 的 E2E、标签可见时间和事后 usage。
 首 token 时写出早期 TTFT 行，结束时另写一行终止记录。失败、超时、取消、未完成流也保留，截断时长不作为正常 E2E 标签。
 入口沿用协议 handler 在 JSON 解析后的时间；终止点在 backend token stream，早于 HTTP／SSE 交付，客户端口径还含解码和传输延迟。
-消费者消失可能是断开、idle timeout 或 adapter 停止，实际原因记 unknown；video 不进入该标签路径。
+消费者消失可能是断开、idle timeout 或 adapter 丢弃，实际原因记 unknown。frontend stop string 匹配按正常完成记录，
+O 使用 decoder 截断后的 token 数，E2E 终点取 decoder 丢弃流的时刻。带 stop string 的请求在请求预算内等待 decoder usage 后
+发布终止行；若未匹配，E2E 终点仍为 backend terminal item。video 不进入该标签路径。
 
 有界写线程在路由锁外写 JSONL，队列溢出和写盘失败均计数；关闭时排空已接收行并记录计数。
 丢失计数非零时不能声称数据完整。开关不改变路由评分。

@@ -9,7 +9,7 @@ use std::time::Duration;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use foretoken_chat::ChatEvent;
-use foretoken_text::output::decoded_text_event_stream;
+use foretoken_text::output::{DecodedTextEvent, decoded_text_event_stream};
 use futures::{Stream, StreamExt};
 
 use crate::runtime::{Generated, GeneratedChat};
@@ -28,6 +28,7 @@ pub(crate) fn sse_response(
 /// Decodes backend tokens while retaining ownership of the cancellable output stream.
 pub(super) fn decoded(generated: Generated) -> impl foretoken_text::TextOutputStream {
     let request_id = generated.routed.routed_request.request.request_id.clone();
+    let mut decoder_output_tokens = generated.decoder_output_tokens;
     let mut stream = generated.routed.stream;
     let raw = async_stream::stream! {
         while let Some(item) = stream.next().await {
@@ -44,6 +45,18 @@ pub(super) fn decoded(generated: Generated) -> impl foretoken_text::TextOutputSt
         generated.decode_options,
         true,
     )
+    .map(move |event| {
+        if let Ok(DecodedTextEvent::TextDelta {
+            finished: Some(finished),
+            ..
+        }) = &event
+            && let Some(sender) = decoder_output_tokens.take()
+        {
+            // Terminal usage comes from the decoder that applies stop-string token truncation.
+            let _ = sender.send(finished.usage.output_token_count);
+        }
+        event
+    })
 }
 
 /// Applies the HTTP stream-idle budget to decoded backend output.
