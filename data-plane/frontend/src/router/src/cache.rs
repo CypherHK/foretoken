@@ -4,7 +4,9 @@
 //! Complete-block prefix observations for request-specific routing costs.
 
 use crate::{RouteCandidate, RouterRequest};
-use foretoken_kv_indexer::{KvPrefixIndexer, KvPrefixQueryResult, KvPrefixUnavailableReason};
+use foretoken_kv_indexer::{
+    KvPrefixIndexer, KvPrefixMatch, KvPrefixQueryResult, KvPrefixUnavailableReason,
+};
 use foretoken_model_protocol::{KvCacheLocality, ModelServerRole};
 
 pub(crate) struct CacheMatch {
@@ -41,13 +43,21 @@ pub(crate) fn cache_observation(
         KvPrefixQueryResult::Matches(matches) => matches,
         KvPrefixQueryResult::Unavailable(reason) => return Err(unavailable_reason(reason)),
     };
-    let block_size = matches
-        .block_size()
+    complete_blocks(request.token_count(), matches.block_size(), matches)
+}
+
+/// Projects observed prefix facts into complete blocks; shared by routing costs and observations.
+pub(crate) fn complete_blocks(
+    input_tokens: usize,
+    block_size: Option<u32>,
+    matches: impl IntoIterator<Item = KvPrefixMatch>,
+) -> Result<CacheMatch, &'static str> {
+    let block_size = block_size
         .filter(|size| *size > 0)
         .ok_or("block_size_unavailable")? as usize;
     let mut info = CacheMatch {
         matched_blocks: 0,
-        total_blocks: request.token_count() / block_size,
+        total_blocks: input_tokens / block_size,
         block_size,
     };
     for matched in matches {

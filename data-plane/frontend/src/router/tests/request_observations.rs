@@ -164,11 +164,15 @@ async fn selection_snapshot_tracks_dispatch_first_token_and_cleanup() {
         assert_eq!(row["reserved_tokens"], reserved);
         assert_eq!(row["pending_first_token_input_tokens"], pending);
         assert_eq!(row["features_at_offset_ms"], row["on_selected_offset_ms"]);
-        assert_eq!(row["scheduler_running_requests"], 3);
-        assert_eq!(row["scheduler_waiting_requests"], 2);
-        assert_eq!(row["kv_cache_usage"], 0.125);
-        assert!(row["received_ms"].is_null());
-        for field in ["prefix_hit_fraction", "matched_blocks", "total_blocks"] {
+        assert_eq!(row["router_rank_scheduler_running_requests"], 3);
+        assert_eq!(row["router_rank_scheduler_waiting_requests"], 2);
+        assert_eq!(row["router_rank_kv_cache_usage"], 0.125);
+        assert!(row.get("received_ms").is_none());
+        for field in [
+            "prefix_hit_fraction",
+            "prefix_matched_blocks",
+            "prefix_total_blocks",
+        ] {
             assert!(row[field].is_null());
             assert_eq!(row["missing_fields"][field], "kv_index_disabled");
         }

@@ -31,3 +31,7 @@ pub use selection::{
     RouteSession, Router, RouterPipeline, RouterPipelineConfig, RouterPipelineConfigError,
     RoutingProgress, RoutingStage, ScoredCandidate, ScorerAlgorithm, ScorerDescriptor, ScorerStage,
 };
+
+#[cfg(test)]
+#[path = "../tests/unit/prefix_observations.rs"]
+mod prefix_observation_tests;

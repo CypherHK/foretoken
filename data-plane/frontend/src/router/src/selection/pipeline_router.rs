@@ -295,10 +295,8 @@ impl<C: Send + 'static> PipelineRouter<C> {
             if let Some(row) = observation.as_mut() {
                 let extra_started = Instant::now();
                 reservations.reserve_pending_prompt(request, &candidate);
-                row.feature_maintenance_cost_ms = (snapshot_cost.expect("snapshot was timed")
-                    + extra_started.elapsed())
-                .as_secs_f64()
-                    * 1000.0;
+                row.feature_maintenance_cost_ms = snapshot_cost
+                    .map(|snapshot| (snapshot + extra_started.elapsed()).as_secs_f64() * 1000.0);
             }
             Ok(candidate)
         })();
