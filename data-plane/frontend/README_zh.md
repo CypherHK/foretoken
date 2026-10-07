@@ -112,9 +112,15 @@ curl --fail-with-body "$FRONTEND_URL/v1/videos" \
 不输出 prompt、token ID、响应正文、端点或凭据。使用进程内单调时钟，不同进程的偏移不能直接比较。
 
 快照在本请求 reserve 前取得。`reserved_tokens` 保留 Router 原有未缓存输入量口径；
-`pending_first_token_input_tokens` 单独统计已建立后端流、尚未收到非空 token item 的 Aggregate 文本请求完整输入量。
+`pending_first_token_input_tokens` 单独统计 frontend 开始 dispatch 后、尚未收到非空 token item 的 Aggregate 文本请求完整输入量，
+包括等待 backend generate 的时间；这个边界不等于引擎开始执行。
 前缀比例的分母为 `floor(input_tokens / block_size)`；来源不可用或分母为零时显式记录 null 和原因。
 引擎 rank gauge 保留来源采样身份，但其单调接收时间未知。
+
+同一开关还记录 frontend 首非空 token 的 TTFT、正常 backend terminal 的 E2E、标签可见时间和事后 usage。
+首 token 时写出早期 TTFT 行，结束时另写一行终止记录。失败、超时、取消、未完成流也保留，截断时长不作为正常 E2E 标签。
+入口沿用协议 handler 在 JSON 解析后的时间；终止点在 backend token stream，早于 HTTP／SSE 交付，客户端口径还含解码和传输延迟。
+消费者消失可能是断开、idle timeout 或 adapter 停止，实际原因记 unknown；video 不进入该标签路径。
 
 有界写线程在路由锁外写 JSONL，队列溢出和写盘失败均计数；关闭时排空已接收行并记录计数。
 丢失计数非零时不能声称数据完整。开关不改变路由评分。

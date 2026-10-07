@@ -29,7 +29,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         None => (None, None),
     };
-    let generation = Arc::new(RuntimeGeneration::new(config.request_timeout));
+    let generation = Arc::new(
+        RuntimeGeneration::new(config.request_timeout)
+            .with_request_observations(observations.clone()),
+    );
 
     // KV locality is optional routing input. Credential failures degrade its score instead
     // of preventing otherwise healthy model routes from serving requests.

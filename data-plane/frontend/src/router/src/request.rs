@@ -3,7 +3,8 @@
 
 //! The minimal request data used for route target selection.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+use std::time::Instant;
 
 use foretoken_kv_indexer::{KvPrefixLookup, KvPrefixUnavailableReason};
 
@@ -15,6 +16,7 @@ pub struct RouterRequest {
     /// Tokenized vLLM request, including prompt tokens, sampling, multimodal, LoRA, and priority.
     pub generate_request: Option<Arc<vllm_llm::GenerateRequest>>,
     video_request_id: Option<String>,
+    selection_timestamp: Option<Arc<OnceLock<Instant>>>,
 }
 
 impl RouterRequest {
@@ -24,6 +26,7 @@ impl RouterRequest {
             model: model.into(),
             generate_request: Some(generate_request),
             video_request_id: None,
+            selection_timestamp: None,
         }
     }
 
@@ -33,6 +36,19 @@ impl RouterRequest {
             model: model.into(),
             generate_request: None,
             video_request_id: Some(request_id),
+            selection_timestamp: None,
+        }
+    }
+
+    /// Attaches frontend label timing; Router sets the first observed selection once, under its lock.
+    pub fn with_selection_timestamp(mut self, timestamp: Arc<OnceLock<Instant>>) -> Self {
+        self.selection_timestamp = Some(timestamp);
+        self
+    }
+
+    pub(crate) fn observe_selection(&self, at: Instant) {
+        if let Some(timestamp) = &self.selection_timestamp {
+            let _ = timestamp.set(at);
         }
     }
 

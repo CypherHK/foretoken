@@ -115,10 +115,20 @@ written. One process monotonic clock is used; its offsets are not comparable acr
 
 Routing snapshots precede the current request's reservation. `reserved_tokens` retains the
 Router's uncached-token accounting; `pending_first_token_input_tokens` separately sums full
-inputs of dispatched Aggregate text requests awaiting their first nonempty token item.
+inputs of Aggregate text requests after frontend dispatch starts, including the backend
+generate future, until their first nonempty token item. This is not an engine-start timestamp.
 Prefix fractions divide matched complete blocks by `floor(input_tokens / block_size)`;
 unavailable sources and a zero denominator are explicit nulls with reasons. Cached engine
 rank gauges retain their source collection identity, but their monotonic receive time is unknown.
+
+The same switch records frontend first-nonempty-token TTFT and normal backend-terminal E2E,
+with availability times and token usage kept separate from selection features. An early TTFT
+row is written before completion, followed by one terminal row. Failed, timed-out, cancelled
+and incomplete streams remain recorded; their censored durations are not valid E2E labels.
+Frontend entry is the protocol handler's existing post-JSON timestamp. Termination is observed
+at the backend token stream, before HTTP/SSE delivery; client TTFT/E2E include further transport
+and decoding delay. Consumer disappearance has an unknown cause (disconnect, idle timeout or
+adapter stop), rather than a proven client-disconnect attribution. Video is outside this label path.
 
 A bounded worker writes JSONL outside routing locks. Queue overflow and write failures are
 counted; process shutdown drains accepted rows and logs the counts. A nonzero loss count

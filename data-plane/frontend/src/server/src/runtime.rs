@@ -24,7 +24,9 @@ use futures::StreamExt;
 use serde::Serialize;
 use thiserror::Error;
 
+mod observations;
 pub(crate) mod workflow;
+use observations::{RequestObservation, Termination};
 
 use workflow::execute_workflow;
 
@@ -405,6 +407,7 @@ pub struct RuntimeGeneration {
     publication_updates: tokio::sync::watch::Sender<u64>,
     accepting: AtomicBool,
     request_timeout: Duration,
+    observations: Option<foretoken_tracing::RequestObservations>,
 }
 
 impl RuntimeGeneration {
@@ -420,7 +423,17 @@ impl RuntimeGeneration {
             publication_updates,
             accepting: AtomicBool::new(true),
             request_timeout,
+            observations: None,
         }
+    }
+
+    /// Enables request labels using the same process channel and clock as Router snapshots.
+    pub fn with_request_observations(
+        mut self,
+        observations: Option<foretoken_tracing::RequestObservations>,
+    ) -> Self {
+        self.observations = observations;
+        self
     }
 
     /// Publishes a newer serving generation without allowing concurrent stale writers to win.
@@ -533,6 +546,7 @@ impl RuntimeGeneration {
         runtime: &ModelRuntime,
         request: GenerationRequest,
         text_request: TextRequest,
+        observation: &mut Option<RequestObservation>,
     ) -> Result<Generated, GenerationError> {
         let bundle = &runtime.bundle;
         let decode_options = text_request.decode_options.clone();
@@ -551,12 +565,19 @@ impl RuntimeGeneration {
             return Err(GenerationError::DeadlineExceeded);
         }
         let generate_request = prepared.generate_request;
-        let context = RouterRequest::new(request.model.clone(), Arc::new(generate_request.clone()));
+        let mut context =
+            RouterRequest::new(request.model.clone(), Arc::new(generate_request.clone()));
+        if let Some(observation) = observation {
+            observation.set_prompt_tokens(generate_request.prompt_token_ids.len());
+            context = context.with_selection_timestamp(observation.selected_timestamp());
+        }
         let mut session = slot.state.router.start(context).await;
         let initial = session
             .select_initial()
             .map_err(|_| GenerationError::Unavailable)?;
         let _queue = foretoken_metrics::QueueGuard::backend_dispatch(&initial.admission_targets);
+        // Include the backend dispatch future itself: response headers may arrive after prefill.
+        session.dispatch_started();
         let (decision, backend_stream) = execute_workflow(
             &*slot.state.resolver,
             &mut *session,
@@ -564,7 +585,6 @@ impl RuntimeGeneration {
             generate_request.clone(),
         )
         .await?;
-        session.dispatch_started();
         // The response stream owns routing load through completion, cancellation, and errors.
         let stream = Box::pin(async_stream::stream! {
             use futures::StreamExt;
@@ -627,37 +647,47 @@ async fn before_deadline<T>(
 ///
 /// The task owns backend cleanup even while HTTP backpressure stops polling the returned stream.
 /// A bounded channel preserves backpressure; dropping its receiver cancels the task's backend work.
-fn deadline_stream(mut stream: TokenStream, deadline: tokio::time::Instant) -> TokenStream {
+fn deadline_stream(
+    mut stream: TokenStream,
+    deadline: tokio::time::Instant,
+    mut observation: Option<RequestObservation>,
+) -> TokenStream {
     let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
     let (expiry_sender, expiry_receiver) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
-        let expired = tokio::select! {
+        let termination = tokio::select! {
             biased;
-            _ = sender.closed() => false,
-            _ = tokio::time::sleep_until(deadline) => true,
-            _ = async {
+            _ = sender.closed() => Termination::ConsumerClosed,
+            _ = tokio::time::sleep_until(deadline) => Termination::Timeout,
+            termination = async {
                 while let Some(item) = stream.next().await {
-                    let finished = item.as_ref().map_or(true, |output| output.finish_reason.is_some());
-                    if sender.send(item).await.is_err() || finished {
-                        break;
+                    if let Some(observation) = observation.as_mut() { observation.item(&item); }
+                    let terminal = Termination::from_item(&item);
+                    // The frontend has observed a terminal backend item. Record before a slow
+                    // HTTP consumer can stall terminal delivery; transport completion is separate.
+                    if let (Some(observation), Some(terminal)) = (observation.as_mut(), terminal) {
+                        observation.finish(terminal);
                     }
+                    if sender.send(item).await.is_err() { return Termination::ConsumerClosed; }
+                    if let Some(terminal) = terminal { return terminal; }
                 }
-            } => false,
+                Termination::Incomplete
+            } => termination,
         };
-        // Release backend work and finish without waiting for a stalled HTTP reader. Expiry has
-        // a separate terminal slot so the queued token remains ordered before the timeout error.
+        // Release frontend reservations before publishing a cancelled/incomplete terminal row.
+        // Backend abort remains best-effort and is not proof that engine work has already stopped.
         drop(stream);
-        if expired {
+        if let Some(observation) = observation.as_mut() {
+            observation.finish(termination);
+        }
+        // Preserve the existing separate timeout slot: queued tokens precede the transport error.
+        if matches!(termination, Termination::Timeout) {
             let _ = expiry_sender.send(());
         }
     });
     Box::pin(async_stream::stream! {
-        while let Some(item) = receiver.recv().await {
-            yield item;
-        }
-        if expiry_receiver.await.is_ok() {
-            yield Err(LlmFacadeError::RequestFailed);
-        }
+        while let Some(item) = receiver.recv().await { yield item; }
+        if expiry_receiver.await.is_ok() { yield Err(LlmFacadeError::RequestFailed); }
     })
 }
 
@@ -697,8 +727,11 @@ impl Generation for RuntimeGeneration {
     }
 
     async fn generate(&self, request: GenerationRequest) -> Result<Generated, GenerationError> {
+        let mut observation = self.observations.as_ref().map(|sink| {
+            RequestObservation::new(sink.clone(), request.request_id.clone(), request.started_at)
+        });
         let deadline = tokio::time::Instant::from_std(request.started_at + self.request_timeout);
-        let mut generated = before_deadline(deadline, async {
+        let generated = before_deadline(deadline, async {
             let slot = self.generation_slot(&request.model).await?;
             let runtime = slot.state.model(&request.model)?;
             let text_request = TextRequest {
@@ -717,11 +750,26 @@ impl Generation for RuntimeGeneration {
                 lora_request: None,
                 arrival_time: request.arrival_time,
             };
-            self.dispatch(slot.clone(), runtime, request, text_request)
-                .await
+            self.dispatch(
+                slot.clone(),
+                runtime,
+                request,
+                text_request,
+                &mut observation,
+            )
+            .await
         })
-        .await?;
-        generated.routed.stream = deadline_stream(generated.routed.stream, deadline);
+        .await;
+        let mut generated = match generated {
+            Ok(generated) => generated,
+            Err(error) => {
+                if let Some(observation) = observation.as_mut() {
+                    observation.preparation_error(error);
+                }
+                return Err(error);
+            }
+        };
+        generated.routed.stream = deadline_stream(generated.routed.stream, deadline, observation);
         Ok(generated)
     }
 
@@ -731,8 +779,11 @@ impl Generation for RuntimeGeneration {
         chat: ChatRequest,
         include_reasoning: bool,
     ) -> Result<GeneratedChat, GenerationError> {
+        let mut observation = self.observations.as_ref().map(|sink| {
+            RequestObservation::new(sink.clone(), request.request_id.clone(), request.started_at)
+        });
         let deadline = tokio::time::Instant::from_std(request.started_at + self.request_timeout);
-        let mut chat = before_deadline(deadline, async {
+        let chat = before_deadline(deadline, async {
             let slot = self.generation_slot(&request.model).await?;
             let runtime = slot.state.model(&request.model)?;
             let (mut text_request, output_processor) = runtime
@@ -757,7 +808,13 @@ impl Generation for RuntimeGeneration {
             // HTTP handler's earlier origin so chat and text requests include the same wait.
             text_request.arrival_time = request.arrival_time.or(text_request.arrival_time);
             let generated = self
-                .dispatch(slot.clone(), runtime, request, text_request)
+                .dispatch(
+                    slot.clone(),
+                    runtime,
+                    request,
+                    text_request,
+                    &mut observation,
+                )
                 .await?;
             Ok(GeneratedChat {
                 generated,
@@ -765,8 +822,18 @@ impl Generation for RuntimeGeneration {
                 include_reasoning,
             })
         })
-        .await?;
-        chat.generated.routed.stream = deadline_stream(chat.generated.routed.stream, deadline);
+        .await;
+        let mut chat = match chat {
+            Ok(chat) => chat,
+            Err(error) => {
+                if let Some(observation) = observation.as_mut() {
+                    observation.preparation_error(error);
+                }
+                return Err(error);
+            }
+        };
+        chat.generated.routed.stream =
+            deadline_stream(chat.generated.routed.stream, deadline, observation);
         Ok(chat)
     }
 

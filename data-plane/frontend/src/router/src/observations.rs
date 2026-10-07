@@ -49,10 +49,7 @@ impl SelectionObservation {
         candidate: &RouteCandidate,
         reservations: &RoutingReservations,
         kv: &dyn KvPrefixIndexer,
-    ) -> Self {
-        let at = sink
-            .offset_ms(Instant::now())
-            .expect("observation origin precedes selection");
+    ) -> (Self, Instant) {
         let mut missing = BTreeMap::new();
         let length = request
             .generate_request
@@ -123,31 +120,39 @@ impl SelectionObservation {
         if collected_at.is_none() {
             missing.insert("collected_at_unix_ms", "telemetry_snapshot_unavailable");
         }
-        Self {
-            schema_version: "stage2-observation-v1",
-            event_type: "router_selected",
-            request_id: request.request_id().to_owned(),
-            clock_domain: sink.clock_domain().to_owned(),
-            features_at_offset_ms: at,
-            on_selected_offset_ms: at,
-            tokenized_input_length: length,
-            route_target_id: candidate.route_target_id.as_str().to_owned(),
-            data_parallel_rank: candidate.data_parallel_rank,
-            role: candidate.role,
-            inflight_before: candidate.local_load.requests,
-            reserved_tokens: candidate.local_load.tokens,
-            pending_first_token_input_tokens: pending,
-            matched_blocks: prefix.as_ref().map(|p| p.matched_blocks),
-            total_blocks: prefix.as_ref().map(|p| p.total_blocks),
-            block_size: prefix.as_ref().map(|p| p.block_size),
-            prefix_hit_fraction: fraction,
-            scheduler_running_requests: running,
-            scheduler_waiting_requests: waiting,
-            kv_cache_usage: kv_usage,
-            collected_at_unix_ms: collected_at,
-            received_ms: None,
-            feature_maintenance_cost_ms: 0.0,
-            missing_fields: missing,
-        }
+        // Stamp after all reads, so no snapshot input is observed after its declared decision time.
+        let selected_at = Instant::now();
+        let at = sink
+            .offset_ms(selected_at)
+            .expect("observation origin precedes selection");
+        (
+            Self {
+                schema_version: "stage2-observation-v1",
+                event_type: "router_selected",
+                request_id: request.request_id().to_owned(),
+                clock_domain: sink.clock_domain().to_owned(),
+                features_at_offset_ms: at,
+                on_selected_offset_ms: at,
+                tokenized_input_length: length,
+                route_target_id: candidate.route_target_id.as_str().to_owned(),
+                data_parallel_rank: candidate.data_parallel_rank,
+                role: candidate.role,
+                inflight_before: candidate.local_load.requests,
+                reserved_tokens: candidate.local_load.tokens,
+                pending_first_token_input_tokens: pending,
+                matched_blocks: prefix.as_ref().map(|p| p.matched_blocks),
+                total_blocks: prefix.as_ref().map(|p| p.total_blocks),
+                block_size: prefix.as_ref().map(|p| p.block_size),
+                prefix_hit_fraction: fraction,
+                scheduler_running_requests: running,
+                scheduler_waiting_requests: waiting,
+                kv_cache_usage: kv_usage,
+                collected_at_unix_ms: collected_at,
+                received_ms: None,
+                feature_maintenance_cost_ms: 0.0,
+                missing_fields: missing,
+            },
+            selected_at,
+        )
     }
 }

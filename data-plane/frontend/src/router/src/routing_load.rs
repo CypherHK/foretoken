@@ -91,7 +91,7 @@ impl RoutingReservations {
         }
     }
 
-    /// Marks successful backend stream establishment; selected-but-not-dispatched work is excluded.
+    /// Marks frontend dispatch start, including the pending backend generate future.
     pub(crate) fn prompt_dispatched(&mut self, key: &ReservationKey, id: &str) {
         if let Some((_, dispatched)) = self
             .pending_prompts

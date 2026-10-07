@@ -36,7 +36,7 @@ pub struct RoutingProgress<'a> {
 /// Holds request-local routing state for one generation request. Aggregate completes directly;
 /// P/D executes P→a fresh D choice, and E/P/D executes E→P→a fresh D choice within one E/P/D route set.
 pub trait RouteSession: Send {
-    /// Marks successful backend stream establishment for observation-only pending input load.
+    /// Marks frontend backend-dispatch start for observation-only pending input load.
     fn dispatch_started(&mut self) {}
 
     /// Releases observation-only full input load at the first nonempty backend token item.

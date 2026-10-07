@@ -280,13 +280,15 @@ impl<C: Send + 'static> PipelineRouter<C> {
             // values are constructed here; serialization and writer enqueue happen after unlock.
             let extra_started = self.observations.as_ref().map(|_| Instant::now());
             if let Some(sink) = &self.observations {
-                observation = Some(crate::observations::SelectionObservation::capture(
+                let (row, selected_at) = crate::observations::SelectionObservation::capture(
                     sink,
                     request,
                     &candidate,
                     &reservations,
                     self.kv_prefix_indexer.as_ref(),
-                ));
+                );
+                request.observe_selection(selected_at);
+                observation = Some(row);
             }
             let snapshot_cost = extra_started.map(|at| at.elapsed());
             reservations.reserve(request, &candidate, self.kv_prefix_indexer.as_ref());
