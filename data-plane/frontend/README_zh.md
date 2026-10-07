@@ -109,7 +109,9 @@ curl --fail-with-body "$FRONTEND_URL/v1/videos" \
 
 将 `FORETOKEN_REQUEST_OBSERVATIONS_JSONL` 设置为新的本地文件路径，可开启 Router 选路观测。
 父目录必须已存在；未设置时默认关闭，空路径或已存在的文件会使启动失败。Unix 文件权限为 `0600`。
-不输出 prompt、token ID、响应正文、端点或凭据。使用进程内单调时钟，不同进程的偏移不能直接比较。
+不输出 prompt、token ID、响应正文、端点或凭据。首行 `clock_anchor` 包含本进程的 `clock_domain`、
+单调偏移零点对应的墙钟纳秒和采样跨度。同一主机墙钟下，消费者可保留采样不确定性，将后续偏移映射到 collector 时钟。
+不同进程偏移仍须显式映射；墙钟跳变或不同主机时钟需要另行验证。
 
 快照在本请求 reserve 前取得。`reserved_tokens` 保留 Router 原有未缓存输入量口径；
 `pending_first_token_input_tokens` 单独统计 frontend 开始 dispatch 后、尚未收到非空 token item 的 Aggregate 文本请求完整输入量，

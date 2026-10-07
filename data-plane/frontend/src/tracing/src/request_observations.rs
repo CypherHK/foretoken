@@ -47,6 +47,17 @@ pub struct ObservationWriter {
     worker: Option<JoinHandle<()>>,
 }
 
+/// Startup anchor for the same host wall clock; the span excludes clock precision, steps and drift.
+#[derive(Serialize)]
+struct ClockAnchor<'a> {
+    schema_version: &'static str,
+    event_type: &'static str,
+    clock_domain: &'a str,
+    origin_offset_ms: f64,
+    origin_unix_ns: u128,
+    wall_sampling_span_ns: u128,
+}
+
 impl RequestObservations {
     /// Creates a new private JSONL file, refusing to overwrite an existing path.
     /// Retain the returned writer until all observed requests have drained.
@@ -61,17 +72,19 @@ impl RequestObservations {
         let file = options.open(path)?;
         let (sender, receiver) = mpsc::sync_channel::<Vec<u8>>(QUEUE_CAPACITY);
         let counters = Arc::new(Counters::default());
+        // Bracket the wall sample with the monotonic origin and retain the sampling uncertainty.
+        let origin = Instant::now();
+        let wall_ns = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(io::Error::other)?
+            .as_nanos();
+        let wall_sampling_span_ns = origin.elapsed().as_nanos();
+        let origin_unix_ns = wall_ns
+            .checked_sub(wall_sampling_span_ns / 2)
+            .ok_or_else(|| io::Error::other("observation clock predates Unix epoch"))?;
         let inner = Arc::new(Inner {
-            origin: Instant::now(),
-            // Wall time is an instance identity only, never a timing conversion.
-            clock_domain: format!(
-                "frontend-{}-{}",
-                std::process::id(),
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos()
-            ),
+            origin,
+            clock_domain: format!("frontend-{}-{}", std::process::id(), origin_unix_ns),
             sender: Mutex::new(Some(sender)),
             counters: counters.clone(),
         });
@@ -102,8 +115,18 @@ impl RequestObservations {
                     }
                 }
             })?;
+        let observations = Self(inner.clone());
+        // Enqueue before handing the sink to producers, so every request references the first row.
+        observations.record(&ClockAnchor {
+            schema_version: "stage2-observation-v1",
+            event_type: "clock_anchor",
+            clock_domain: observations.clock_domain(),
+            origin_offset_ms: 0.0,
+            origin_unix_ns,
+            wall_sampling_span_ns,
+        });
         Ok((
-            Self(inner.clone()),
+            observations,
             ObservationWriter {
                 inner,
                 worker: Some(worker),
@@ -111,7 +134,7 @@ impl RequestObservations {
         ))
     }
 
-    /// Identifies this frontend's monotonic clock; unrelated processes cannot compare these offsets.
+    /// Identifies the clock referenced by the startup anchor; offsets require explicit consumer mapping.
     pub fn clock_domain(&self) -> &str {
         &self.0.clock_domain
     }

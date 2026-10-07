@@ -103,7 +103,8 @@ fn rows(path: &std::path::Path) -> Vec<Value> {
     assert!(!text.contains("DO_NOT_EXPORT_SALT"));
     assert!(!text.contains("prompt_token_ids"));
     text.lines()
-        .map(|line| serde_json::from_str(line).unwrap())
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .filter(|row| row["event_type"] != "clock_anchor")
         .collect()
 }
 
@@ -148,7 +149,7 @@ async fn selection_snapshot_tracks_dispatch_first_token_and_cleanup() {
     let counts = writer.finish();
     assert_eq!(
         (counts.written, counts.dropped, counts.write_errors),
-        (6, 0, 0)
+        (7, 0, 0)
     );
     let rows = rows(&path);
     let expected = [
@@ -223,7 +224,7 @@ async fn enabling_observations_preserves_routing_and_reports_cpu_cost() {
     let counts = writer.finish();
     assert_eq!(
         (counts.written, counts.dropped, counts.write_errors),
-        (1000, 0, 0)
+        (1001, 0, 0)
     );
     let rows = rows(&path);
     let costs: Vec<f64> = rows

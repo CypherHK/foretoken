@@ -111,7 +111,11 @@ Set `FORETOKEN_REQUEST_OBSERVATIONS_JSONL` to a new local file path to opt in to
 selection observations. The parent directory must already exist. An unset variable disables
 observations; an empty path or an existing output file fails startup. Files are created with
 mode `0600` on Unix. No prompt text, token IDs, response text, endpoints or credentials are
-written. One process monotonic clock is used; its offsets are not comparable across processes.
+written. The first row is a `clock_anchor` with this process's `clock_domain`, the wall-clock
+nanoseconds corresponding to monotonic offset zero, and the wall sampling span. Consumers can
+map later offsets onto a collector clock sharing the host wall clock, retaining the uncertainty.
+Offsets from different processes remain incomparable without that explicit mapping; wall-clock
+steps or clocks on different hosts need separate verification.
 
 Routing snapshots precede the current request's reservation. `reserved_tokens` retains the
 Router's uncached-token accounting; `pending_first_token_input_tokens` separately sums full
