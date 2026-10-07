@@ -15,12 +15,14 @@ const REQUEST_TIMEOUT_SECONDS_ENV: &str = "FORETOKEN_REQUEST_TIMEOUT_SECONDS";
 const STREAM_IDLE_SECONDS_ENV: &str = "FORETOKEN_STREAM_IDLE_SECONDS";
 const KV_INDEX_KEY_PATH_ENV: &str = "FORETOKEN_KV_INDEX_KEY_PATH";
 const ROUTER_PIPELINE_ENV: &str = "FORETOKEN_ROUTER_PIPELINE";
+const REQUEST_OBSERVATIONS_ENV: &str = "FORETOKEN_REQUEST_OBSERVATIONS_JSONL";
 pub(crate) struct RuntimeConfig {
     pub(crate) serving_snapshot: PathBuf,
     pub(crate) listen_address: String,
     pub(crate) request_timeout: Duration,
     pub(crate) stream_idle: Duration,
     pub(crate) router_pipeline: RouterPipelineConfig,
+    pub(crate) request_observations: Option<PathBuf>,
 }
 
 impl RuntimeConfig {
@@ -35,6 +37,7 @@ impl RuntimeConfig {
             request_timeout: required_positive_duration(REQUEST_TIMEOUT_SECONDS_ENV)?,
             stream_idle: required_positive_duration(STREAM_IDLE_SECONDS_ENV)?,
             router_pipeline: router_pipeline_from_env(|name| env::var(name))?,
+            request_observations: request_observations_from_env(|name| env::var(name))?,
         })
     }
 }
@@ -56,6 +59,20 @@ pub(crate) fn router_pipeline_from_env(
     };
     pipeline.validate().map_err(|error| error.to_string())?;
     Ok(pipeline)
+}
+
+/// Parses the optional local observation path. An unset value preserves the serving default.
+fn request_observations_from_env(
+    get_env: impl Fn(&str) -> Result<String, env::VarError>,
+) -> Result<Option<PathBuf>, String> {
+    match get_env(REQUEST_OBSERVATIONS_ENV) {
+        Ok(path) if !path.is_empty() => Ok(Some(path.into())),
+        Ok(_) => Err(format!("{REQUEST_OBSERVATIONS_ENV} must not be empty")),
+        Err(env::VarError::NotPresent) => Ok(None),
+        Err(env::VarError::NotUnicode(_)) => {
+            Err(format!("{REQUEST_OBSERVATIONS_ENV} must be UTF-8"))
+        }
+    }
 }
 
 fn required_env(name: &str) -> Result<String, String> {

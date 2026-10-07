@@ -22,6 +22,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Establish the long-lived generation owner before starting background refreshes.
     // Snapshot updates publish atomically, so an invalid update cannot replace active routing.
     let config = RuntimeConfig::from_env().map_err(std::io::Error::other)?;
+    let (observations, _observation_writer) = match &config.request_observations {
+        Some(path) => {
+            let (sink, writer) = foretoken_tracing::RequestObservations::create(path)?;
+            (Some(sink), Some(writer))
+        }
+        None => (None, None),
+    };
     let generation = Arc::new(RuntimeGeneration::new(config.request_timeout));
 
     // KV locality is optional routing input. Credential failures degrade its score instead
@@ -41,7 +48,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             KvIndexCredential::Degraded(reason)
         }
     };
-    let builder = Arc::new(RuntimeBuilder::new(config.router_pipeline, kv_credential));
+    let builder = Arc::new(
+        RuntimeBuilder::new(config.router_pipeline, kv_credential)
+            .with_request_observations(observations),
+    );
 
     // Bind the HTTP listener before launching the refresh loops. The process can remain
     // live while readiness stays false until a complete serving generation is available.

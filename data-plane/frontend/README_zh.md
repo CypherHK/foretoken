@@ -105,6 +105,20 @@ curl --fail-with-body "$FRONTEND_URL/v1/videos" \
 
 取消和删除请求返回 `202` 后继续由服务处理。以上配置保留结果一天，从任务结束起算；到期后自动清理，原始参考文件保留。
 
+### 本地请求观测
+
+将 `FORETOKEN_REQUEST_OBSERVATIONS_JSONL` 设置为新的本地文件路径，可开启 Router 选路观测。
+父目录必须已存在；未设置时默认关闭，空路径或已存在的文件会使启动失败。Unix 文件权限为 `0600`。
+不输出 prompt、token ID、响应正文、端点或凭据。使用进程内单调时钟，不同进程的偏移不能直接比较。
+
+快照在本请求 reserve 前取得。`reserved_tokens` 保留 Router 原有未缓存输入量口径；
+`pending_first_token_input_tokens` 单独统计已建立后端流、尚未收到非空 token item 的 Aggregate 文本请求完整输入量。
+前缀比例的分母为 `floor(input_tokens / block_size)`；来源不可用或分母为零时显式记录 null 和原因。
+引擎 rank gauge 保留来源采样身份，但其单调接收时间未知。
+
+有界写线程在路由锁外写 JSONL，队列溢出和写盘失败均计数；关闭时排空已接收行并记录计数。
+丢失计数非零时不能声称数据完整。开关不改变路由评分。
+
 ## 运维
 
 使用 `foretoken status` 查看部署状态，使用 `foretoken delete` 删除部署，均传入对应配置目录。

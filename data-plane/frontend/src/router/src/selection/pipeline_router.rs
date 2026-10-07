@@ -30,6 +30,7 @@ pub struct PipelineRouter<C: Send + 'static = ()> {
     pipeline: Arc<RouterPipeline<C>>,
     routing_load: Arc<Mutex<RoutingReservations>>,
     metrics: Arc<crate::metrics::RouterMetricsScope>,
+    observations: Option<foretoken_tracing::RequestObservations>,
 }
 impl<C: Send + 'static> PipelineRouter<C> {
     /// Creates a Router with no-op KV-prefix and route-target statistics readers.
@@ -49,7 +50,17 @@ impl<C: Send + 'static> PipelineRouter<C> {
             pipeline,
             routing_load: Arc::new(Mutex::new(RoutingReservations::default())),
             metrics,
+            observations: None,
         }
+    }
+
+    /// Enables local observations without changing the routing pipeline or its scores.
+    pub fn with_request_observations(
+        mut self,
+        observations: Option<foretoken_tracing::RequestObservations>,
+    ) -> Self {
+        self.observations = observations;
+        self
     }
 
     /// Shares frontend-owned request load across runtime generations built by RuntimeBuilder.
@@ -145,6 +156,7 @@ impl<C: Send + 'static> PipelineRouter<C> {
         let [filter_name, scorer_name, picker_name] = self.pipeline.algorithm_names;
         // Keep every early return inside the round so failed candidate discovery or invalid
         // algorithm output is counted as well as successful selections.
+        let mut observation = None;
         let result = (|| {
             // Filter and Scorer see the complete compatible, healthy snapshot. Stage and connector
             // eligibility are applied after scoring and before Picker.
@@ -264,9 +276,33 @@ impl<C: Send + 'static> PipelineRouter<C> {
             if let Some(on_selected) = on_selected {
                 on_selected(&candidate);
             }
+            // Snapshot and the separate pending ledger share the existing transaction. Only typed
+            // values are constructed here; serialization and writer enqueue happen after unlock.
+            let extra_started = self.observations.as_ref().map(|_| Instant::now());
+            if let Some(sink) = &self.observations {
+                observation = Some(crate::observations::SelectionObservation::capture(
+                    sink,
+                    request,
+                    &candidate,
+                    &reservations,
+                    self.kv_prefix_indexer.as_ref(),
+                ));
+            }
+            let snapshot_cost = extra_started.map(|at| at.elapsed());
             reservations.reserve(request, &candidate, self.kv_prefix_indexer.as_ref());
+            if let Some(row) = observation.as_mut() {
+                let extra_started = Instant::now();
+                reservations.reserve_pending_prompt(request, &candidate);
+                row.feature_maintenance_cost_ms = (snapshot_cost.expect("snapshot was timed")
+                    + extra_started.elapsed())
+                .as_secs_f64()
+                    * 1000.0;
+            }
             Ok(candidate)
         })();
+        if let (Some(sink), Some(row)) = (&self.observations, observation) {
+            sink.record(&row);
+        }
         metrics.selection(&request.model, round, started.elapsed(), result.as_ref());
         result
     }
@@ -409,6 +445,34 @@ impl<C: Send + 'static> Drop for Session<C> {
     }
 }
 impl<C: Send + 'static> RouteSession for Session<C> {
+    fn dispatch_started(&mut self) {
+        if self.router.observations.is_none() {
+            return;
+        }
+        let mut reservations = self
+            .router
+            .routing_load
+            .lock()
+            .expect("routing load lock poisoned");
+        for key in &self.selected {
+            reservations.prompt_dispatched(key, self.request.request_id());
+        }
+    }
+
+    fn first_token_received(&mut self) {
+        if self.router.observations.is_none() {
+            return;
+        }
+        let mut reservations = self
+            .router
+            .routing_load
+            .lock()
+            .expect("routing load lock poisoned");
+        for key in &self.selected {
+            reservations.release_pending_prompt(key, self.request.request_id());
+        }
+    }
+
     fn response_started(&mut self) {
         let mut reservations = self
             .router
@@ -572,6 +636,7 @@ impl<C: Send + 'static> Router for PipelineRouter<C> {
                 pipeline: self.pipeline.clone(),
                 routing_load: self.routing_load.clone(),
                 metrics: self.metrics.clone(),
+                observations: self.observations.clone(),
             },
             customized_context: (self.pipeline.customized_context_factory)(&request),
             request,

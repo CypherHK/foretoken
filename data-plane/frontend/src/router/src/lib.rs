@@ -7,6 +7,7 @@ pub mod algorithm;
 mod cache;
 mod inventory;
 mod metrics;
+mod observations;
 mod request;
 mod route_target_stats;
 mod routing_load;

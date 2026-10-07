@@ -105,6 +105,25 @@ The response contains a task `id`, `status_url`, and `content_url`. Use the same
 
 Cancellation and deletion continue after the HTTP `202` response. The configuration above retains results for one day after a task ends, then removes them automatically. Original reference files are retained.
 
+### Local request observations
+
+Set `FORETOKEN_REQUEST_OBSERVATIONS_JSONL` to a new local file path to opt in to Router
+selection observations. The parent directory must already exist. An unset variable disables
+observations; an empty path or an existing output file fails startup. Files are created with
+mode `0600` on Unix. No prompt text, token IDs, response text, endpoints or credentials are
+written. One process monotonic clock is used; its offsets are not comparable across processes.
+
+Routing snapshots precede the current request's reservation. `reserved_tokens` retains the
+Router's uncached-token accounting; `pending_first_token_input_tokens` separately sums full
+inputs of dispatched Aggregate text requests awaiting their first nonempty token item.
+Prefix fractions divide matched complete blocks by `floor(input_tokens / block_size)`;
+unavailable sources and a zero denominator are explicit nulls with reasons. Cached engine
+rank gauges retain their source collection identity, but their monotonic receive time is unknown.
+
+A bounded worker writes JSONL outside routing locks. Queue overflow and write failures are
+counted; process shutdown drains accepted rows and logs the counts. A nonzero loss count
+precludes claiming a complete observation dataset. This switch does not change routing scores.
+
 ## Operations
 
 Use `foretoken status` to inspect a deployment and `foretoken delete` to remove it, passing its configuration directory to either command.

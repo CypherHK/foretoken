@@ -564,15 +564,21 @@ impl RuntimeGeneration {
             generate_request.clone(),
         )
         .await?;
+        session.dispatch_started();
         // The response stream owns routing load through completion, cancellation, and errors.
         let stream = Box::pin(async_stream::stream! {
             use futures::StreamExt;
             let mut backend_stream = backend_stream;
             let mut response_started = false;
+            let mut first_token_received = false;
             while let Some(output) = backend_stream.next().await {
                 if !response_started {
                     session.response_started();
                     response_started = true;
+                }
+                if !first_token_received && output.as_ref().is_ok_and(|item| !item.token_ids.is_empty()) {
+                    session.first_token_received();
+                    first_token_received = true;
                 }
                 let terminal = output.as_ref().map_or(true, |output| output.finish_reason.is_some());
                 if terminal { session.stage_complete(); }

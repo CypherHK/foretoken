@@ -33,6 +33,7 @@ pub struct RuntimeBuilder {
     router_pipeline: Result<Arc<RouterPipeline>, RouterPipelineConfigError>,
     kv_credential: KvIndexCredential,
     routing_load: foretoken_router::RoutingLoadState,
+    observations: Option<foretoken_tracing::RequestObservations>,
 }
 
 impl RuntimeBuilder {
@@ -45,7 +46,17 @@ impl RuntimeBuilder {
             router_pipeline: router_pipeline.build().map(Arc::new),
             kv_credential,
             routing_load: Default::default(),
+            observations: None,
         }
+    }
+
+    /// Retains one process-wide observation channel across snapshot updates.
+    pub fn with_request_observations(
+        mut self,
+        observations: Option<foretoken_tracing::RequestObservations>,
+    ) -> Self {
+        self.observations = observations;
+        self
     }
 
     /// Decodes controller-provided bytes into a serving snapshot candidate for [`Self::build`].
@@ -148,6 +159,7 @@ impl RuntimeBuilder {
                     .clone(),
             )
             .with_load_state(self.routing_load.clone())
+            .with_request_observations(self.observations.clone())
             .with_kv_prefix_indexer(kv_indexer)
             .with_route_target_stats_reader(registry.clone()),
         );

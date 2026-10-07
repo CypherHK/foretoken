@@ -29,6 +29,8 @@ pub struct RoutingLoadSnapshot {
 #[derive(Default)]
 pub(crate) struct RoutingReservations {
     requests: BTreeMap<ReservationKey, BTreeMap<String, usize>>,
+    // Observation-only full prompt ledger. This never feeds routing scores.
+    pending_prompts: BTreeMap<ReservationKey, BTreeMap<String, (usize, bool)>>,
 }
 
 impl RoutingReservations {
@@ -69,6 +71,57 @@ impl RoutingReservations {
             .insert(request.request_id().to_owned(), uncached_tokens);
     }
 
+    /// Records an Aggregate selection separately from the legacy uncached-token reservation.
+    pub(crate) fn reserve_pending_prompt(
+        &mut self,
+        request: &RouterRequest,
+        candidate: &RouteCandidate,
+    ) {
+        if candidate.role == ModelServerRole::Aggregate && request.generate_request.is_some() {
+            self.pending_prompts
+                .entry((
+                    candidate.route_target_id.clone(),
+                    candidate.data_parallel_rank,
+                ))
+                .or_default()
+                .insert(
+                    request.request_id().to_owned(),
+                    (request.token_count(), false),
+                );
+        }
+    }
+
+    /// Marks successful backend stream establishment; selected-but-not-dispatched work is excluded.
+    pub(crate) fn prompt_dispatched(&mut self, key: &ReservationKey, id: &str) {
+        if let Some((_, dispatched)) = self
+            .pending_prompts
+            .get_mut(key)
+            .and_then(|m| m.get_mut(id))
+        {
+            *dispatched = true;
+        }
+    }
+
+    /// Sums full inputs still awaiting a nonempty backend token item for this exact target/rank.
+    pub(crate) fn pending_prompt_tokens(&self, key: &ReservationKey) -> usize {
+        self.pending_prompts.get(key).map_or(0, |m| {
+            m.values()
+                .filter(|(_, dispatched)| *dispatched)
+                .map(|(tokens, _)| *tokens)
+                .sum()
+        })
+    }
+
+    /// Removes the observation-only contribution on first token, failure, completion or cancellation.
+    pub(crate) fn release_pending_prompt(&mut self, key: &ReservationKey, id: &str) {
+        if let Some(prompts) = self.pending_prompts.get_mut(key) {
+            prompts.remove(id);
+            if prompts.is_empty() {
+                self.pending_prompts.remove(key);
+            }
+        }
+    }
+
     /// Releases prompt-token load when the first response reaches the frontend.
     pub(crate) fn release_prompt_load(&mut self, key: &ReservationKey, id: &str) {
         if let Some(request) = self
@@ -82,6 +135,7 @@ impl RoutingReservations {
 
     /// Removes exactly one request-stage contribution on completion, rejection, or cancellation.
     pub(crate) fn release(&mut self, key: &ReservationKey, id: &str) {
+        self.release_pending_prompt(key, id);
         if let Some(requests) = self.requests.get_mut(key) {
             requests.remove(id);
             if requests.is_empty() {

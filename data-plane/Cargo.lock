@@ -1321,11 +1321,14 @@ dependencies = [
  "foretoken-engine-core-client",
  "foretoken-kv-indexer",
  "foretoken-model-protocol",
+ "foretoken-tracing",
  "inventory",
  "prometheus-client",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.20",
+ "tokio",
  "tracing",
  "vllm-llm",
 ]
@@ -1341,6 +1344,7 @@ dependencies = [
  "foretoken-router",
  "foretoken-server",
  "foretoken-text",
+ "foretoken-tracing",
  "reqwest 0.12.28",
  "serde_json",
  "thiserror 2.0.20",
@@ -1404,6 +1408,9 @@ dependencies = [
 name = "foretoken-tracing"
 version = "0.0.1"
 dependencies = [
+ "serde",
+ "serde_json",
+ "tracing",
  "vllm-tracing",
 ]
 

@@ -4,7 +4,7 @@
 //! Complete-block prefix observations for request-specific routing costs.
 
 use crate::{RouteCandidate, RouterRequest};
-use foretoken_kv_indexer::{KvPrefixIndexer, KvPrefixQueryResult};
+use foretoken_kv_indexer::{KvPrefixIndexer, KvPrefixQueryResult, KvPrefixUnavailableReason};
 use foretoken_model_protocol::{KvCacheLocality, ModelServerRole};
 
 pub(crate) struct CacheMatch {
@@ -19,19 +19,32 @@ pub(crate) fn cache_match(
     candidate: &RouteCandidate,
     kv: &dyn KvPrefixIndexer,
 ) -> Option<CacheMatch> {
+    cache_observation(request, candidate, kv).ok()
+}
+
+/// Reads the same complete-block projection, retaining unavailable reasons for local observations.
+pub(crate) fn cache_observation(
+    request: &RouterRequest,
+    candidate: &RouteCandidate,
+    kv: &dyn KvPrefixIndexer,
+) -> Result<CacheMatch, &'static str> {
     if candidate.role == ModelServerRole::Encoder {
-        return None;
+        return Err("encoder_has_no_prefix_semantics");
     }
     let lookup = request
         .kv_prefix_lookup(
             candidate.route_target_id.as_str(),
             candidate.data_parallel_rank,
         )
-        .ok()?;
-    let KvPrefixQueryResult::Matches(matches) = kv.prefix_matches(lookup) else {
-        return None;
+        .map_err(unavailable_reason)?;
+    let matches = match kv.prefix_matches(lookup) {
+        KvPrefixQueryResult::Matches(matches) => matches,
+        KvPrefixQueryResult::Unavailable(reason) => return Err(unavailable_reason(reason)),
     };
-    let block_size = matches.block_size()? as usize;
+    let block_size = matches
+        .block_size()
+        .filter(|size| *size > 0)
+        .ok_or("block_size_unavailable")? as usize;
     let mut info = CacheMatch {
         matched_blocks: 0,
         total_blocks: request.token_count() / block_size,
@@ -44,5 +57,15 @@ pub(crate) fn cache_match(
         let count = (matched.matched_tokens / block_size).min(info.total_blocks);
         info.matched_blocks = info.matched_blocks.max(count);
     }
-    Some(info)
+    Ok(info)
+}
+
+fn unavailable_reason(reason: KvPrefixUnavailableReason) -> &'static str {
+    match reason {
+        KvPrefixUnavailableReason::Disabled => "kv_index_disabled",
+        KvPrefixUnavailableReason::SourceUnhealthy => "kv_source_unhealthy",
+        KvPrefixUnavailableReason::MissingBinding => "kv_binding_missing",
+        KvPrefixUnavailableReason::UnsupportedRequest => "unsupported_request",
+        KvPrefixUnavailableReason::RankMismatch => "kv_rank_mismatch",
+    }
 }
