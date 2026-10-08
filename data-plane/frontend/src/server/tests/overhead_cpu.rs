@@ -52,6 +52,150 @@ impl RouteInventory for Inventory {
     }
 }
 
+fn prefix_bytes(left: &str, right: &str) -> usize {
+    left.bytes()
+        .zip(right.bytes())
+        .take_while(|(a, b)| a == b)
+        .count()
+}
+
+fn tokenizer_sample(
+    tokenizer: &HuggingFaceTokenizer,
+    prompt: &str,
+    previous: &str,
+    source_index: usize,
+    target: Option<usize>,
+    thresholds: (usize, usize),
+) -> Value {
+    assert!(
+        prompt.is_ascii(),
+        "NFC must leave the measured input unchanged"
+    );
+    let common = prefix_bytes(previous, prompt);
+    let start = Instant::now();
+    let tokens = black_box(tokenizer.encode(black_box(prompt), false).unwrap());
+    let elapsed = start.elapsed().as_nanos();
+    if let Some(target) = target {
+        assert_eq!(tokens.len(), target, "scan must use actual encoded length");
+    }
+    let reuse_possible = common >= thresholds.0;
+    json!({"source_index":source_index,"input_bytes":prompt.len(),"actual_tokens":tokens.len(),
+        "target_tokens":target,"elapsed_ns":elapsed,"common_prefix_bytes":common,
+        "incremental_reuse_possible":reuse_possible,
+        "parallel_match_source_condition":if reuse_possible {None} else {Some(prompt.len() >= thresholds.1)},
+        "parallel_match_basis":"PCRE2 Isolated single-split source predicate; no internal thread instrumentation"})
+}
+
+// Separate opt-in supplement: changing T4 text and exact encoded-length scans. No service or engine.
+#[test]
+fn release_cpu_tokenizer_scan() {
+    let Ok(output) = std::env::var("FORETOKEN_TOKENIZER_SCAN_OUTPUT") else {
+        return;
+    };
+    assert!(!black_box(cfg!(debug_assertions)), "scan requires release");
+    let file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(output)
+        .unwrap();
+    let config: Value = serde_json::from_str(
+        &std::fs::read_to_string(std::env::var("FORETOKEN_TOKENIZER_SCAN_CONFIG").unwrap())
+            .unwrap(),
+    )
+    .unwrap();
+    let tokenizer_path = config["tokenizer"].as_str().unwrap();
+    let tokenizer = HuggingFaceTokenizer::new_fastokens(Path::new(tokenizer_path)).unwrap();
+    let thresholds = (
+        config["incremental_min_prefix_bytes"].as_u64().unwrap() as usize,
+        config["parallel_min_bytes"].as_u64().unwrap() as usize,
+    );
+    assert!(thresholds.0 > 0 && thresholds.1 > 0);
+    let prompts: Vec<String> = std::fs::read_to_string(config["prompts"].as_str().unwrap())
+        .unwrap()
+        .lines()
+        .map(|line| {
+            serde_json::from_str::<Value>(line).unwrap()["prompt"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect();
+    let repeated = config["repeated_samples"].as_u64().unwrap() as usize;
+    let scan_count = config["samples_per_length"].as_u64().unwrap() as usize;
+    assert!(repeated > 0 && scan_count > 1 && scan_count <= prompts.len());
+    let mut groups = BTreeMap::new();
+    // Compile/warm once. This group deliberately retains the old same-text cache boundary.
+    black_box(tokenizer.encode(&prompts[0], false).unwrap());
+    groups.insert(
+        "same_text_cached".to_owned(),
+        (0..repeated)
+            .map(|_| tokenizer_sample(&tokenizer, &prompts[0], &prompts[0], 0, None, thresholds))
+            .collect::<Vec<_>>(),
+    );
+    let mut different = Vec::new();
+    let mut previous = "";
+    // Clear the thread-local Split cache with a short probe before the changing-text sequence.
+    black_box(tokenizer.encode("x", false).unwrap());
+    for (index, prompt) in prompts.iter().enumerate() {
+        assert!(prefix_bytes(previous, prompt) < thresholds.0);
+        different.push(tokenizer_sample(
+            &tokenizer, prompt, previous, index, None, thresholds,
+        ));
+        previous = prompt;
+    }
+    groups.insert("different_T4_prompts".to_owned(), different);
+    let mut prepared_checks = Vec::new();
+    for length in config["lengths"].as_array().unwrap() {
+        let length = length.as_u64().unwrap() as usize;
+        assert!(length > 0);
+        let mut texts = Vec::new();
+        for (index, prompt) in prompts.iter().take(scan_count).enumerate() {
+            let mut text = prompt.clone();
+            let mut ids = tokenizer.encode(&text, false).unwrap();
+            while ids.len() < length {
+                text.push('\n');
+                text.push_str(prompt);
+                ids = tokenizer.encode(&text, false).unwrap();
+            }
+            // Prefix decoding is preparation, outside the timer. Re-encoding must match the target.
+            let text = tokenizer.decode(&ids[..length], false).unwrap();
+            assert_eq!(tokenizer.encode(&text, false).unwrap().len(), length);
+            assert!(text.is_ascii());
+            prepared_checks.push(
+                json!({"source_index":index,"target_tokens":length,"input_bytes":text.len(),"input":text}),
+            );
+            texts.push(text);
+        }
+        black_box(tokenizer.encode("x", false).unwrap());
+        let mut samples = Vec::new();
+        let mut previous = "";
+        for (index, prompt) in texts.iter().enumerate() {
+            assert!(prefix_bytes(previous, prompt) < thresholds.0);
+            samples.push(tokenizer_sample(
+                &tokenizer,
+                prompt,
+                previous,
+                index,
+                Some(length),
+                thresholds,
+            ));
+            previous = prompt;
+        }
+        groups.insert(format!("length_{length}"), samples);
+    }
+    let timer_samples: Vec<_> = (0..1000)
+        .map(|_| {
+            let start = Instant::now();
+            black_box(start.elapsed().as_nanos())
+        })
+        .collect();
+    serde_json::to_writer_pretty(file, &json!({"profile":"release","debug_assertions":cfg!(debug_assertions),
+        "groups":groups,"preparation_checks":prepared_checks,"timer_samples_ns":timer_samples,
+        "available_parallelism":std::thread::available_parallelism().unwrap().get(),
+        "internal_parallel_match_counter":"unknown: private dependency has no exposed counter; source conditions reported",
+        "scope":"T4 text CPU tokenizer supplement; no engine or deployment claim"})).unwrap();
+}
+
 struct CachedStats(Mutex<history::RouteTargetStatsHistory>, Duration);
 impl RouteTargetStatsReader for CachedStats {
     fn stats(&self, _: &RouteTargetId, _: Duration) -> Option<RouteTargetStats> {
