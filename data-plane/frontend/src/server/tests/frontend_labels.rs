@@ -634,3 +634,76 @@ async fn frontend_labels_pair_with_loopback_client_and_retain_incomplete_request
         summary["ttft_difference_ms"]
     );
 }
+
+// An external Python client must exercise real HTTP ids/framing and a separate writer clock.
+// Opt-in only: no listener, file or backend exists unless the caller supplies a private directory.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn external_loopback_observation_fixture() {
+    use std::io::Write;
+    let Some(directory) = std::env::var_os("FORETOKEN_T7_FIXTURE_DIRECTORY") else {
+        return;
+    };
+    let directory = std::path::PathBuf::from(directory);
+    let limit_ms: u64 = std::env::var("FORETOKEN_T7_FIXTURE_LIMIT_MS")
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(limit_ms > 0);
+    let (sink, writer) = RequestObservations::create(directory.join("events.jsonl")).unwrap();
+    let generation = runtime(&directory, Some(sink), Arc::new(AtomicBool::new(false)));
+    let app = foretoken_server::router(
+        generation.clone(),
+        Arc::new(|| vec!["fixture".into()]),
+        Duration::from_secs(2),
+    )
+    .unwrap()
+    // Test-only telemetry serves synthetic gauges; frontend events themselves are real.
+    .route(
+        "/v1/internal/telemetry",
+        axum::routing::get(|| async {
+            axum::Json(json!({"version":2,"collected_at_unix_ms":
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis(),
+            "accepting":true,"running_requests":0,"scheduler_running_requests":0,
+            "scheduler_waiting_requests":0,"kv_cache_usage":0.125,
+            "prompt_tokens_total":0,"generation_tokens_total":0}))
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let mut ready = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(directory.join("ready.json"))
+        .unwrap();
+    writeln!(
+        ready,
+        "{}",
+        json!({"host":"127.0.0.1","port":address.port(),
+        "model":"fixture","process_id":std::process::id(),"telemetry":"synthetic fixture gauges"})
+    )
+    .unwrap();
+    drop(ready);
+    let stop = directory.join("stop");
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            let _ = tokio::time::timeout(Duration::from_millis(limit_ms), async {
+                while !stop.exists() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await;
+        })
+        .await
+        .unwrap();
+    drop(generation);
+    let counts = writer.finish();
+    assert_eq!(counts.dropped, 0);
+    assert_eq!(counts.write_errors, 0);
+    let mut receipt = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(directory.join("finished.json"))
+        .unwrap();
+    writeln!(receipt, "{}", json!({"process_id":std::process::id(),"written":counts.written,
+        "dropped":counts.dropped,"write_errors":counts.write_errors,"stopped_by_client":directory.join("stop").exists()})).unwrap();
+}
