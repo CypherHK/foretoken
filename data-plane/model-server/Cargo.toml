@@ -23,7 +23,7 @@ futures.workspace = true
 reqwest.workspace = true
 rmp-serde.workspace = true
 rmpv.workspace = true
-rustix.workspace = true
+rustix = { workspace = true, features = ["time"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

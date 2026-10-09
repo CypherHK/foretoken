@@ -14,6 +14,7 @@ use foretoken_model_protocol::{PreparedTokenizer, RuntimeMetadataResponse, Runti
 use foretoken_model_server::api::{AppState, RuntimeHealth, router};
 use foretoken_model_server::backend::VllmBackend;
 use foretoken_model_server::config::{MODEL_GROUP_UID_ENV, RuntimeConfig};
+use foretoken_model_server::engine_observations::EngineObservations;
 use foretoken_model_server::kv_event_adapter::KvEventAdapter;
 use foretoken_model_server::launch::LaunchPlanV1;
 use foretoken_model_server::managed_engine::ManagedEngine;
@@ -54,6 +55,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Resolve the controller-owned launch plan before starting any engine or network task.
     let config = RuntimeConfig::from_env().map_err(std::io::Error::other)?;
+    let observation_config = serde_json::json!({
+        "block_size": {"value": config.launch.engine_args.get("block-size"), "source": "config"},
+        "max_num_seqs": {"value": config.launch.engine_args.get("max-num-seqs"), "source": "config"},
+        "max_num_batched_tokens": {"value": config.launch.engine_args.get("max-num-batched-tokens"), "source": "config"},
+        "dtype": {"value": config.launch.engine_args.get("dtype"), "source": "config"},
+    });
+    let (observations, observation_writer) = match EngineObservations::from_env(observation_config)?
+    {
+        Some((observations, writer)) => {
+            if config.launch.parallelism.dp != 1
+                || config.launch.node_count != 1
+                || config.member.is_some()
+            {
+                return Err("engine observations support only one local DP engine".into());
+            }
+            (Some(observations), Some(writer))
+        }
+        None => (None, None),
+    };
     let cache_shutdown = Arc::new(Notify::new());
     let cache_config = runtime_cache::Config::from_env().map_err(std::io::Error::other)?;
     let profiling_config = if let Some(cache) = &cache_config {
@@ -114,6 +134,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         runtime_cache::Mode::Persistent,
         startup_deadline,
         &mut cache_server,
+        observations.as_ref(),
     )
     .await
     {
@@ -141,6 +162,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 runtime_cache::Mode::Temporary,
                 startup_deadline,
                 &mut cache_server,
+                observations.as_ref(),
             )
             .await
             {
@@ -360,6 +382,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         profiler.engine_stopped("runtime terminated").await;
     }
 
+    if let Some(writer) = observation_writer {
+        let counts = writer.finish().await;
+        info!(
+            written = counts.written,
+            dropped = counts.dropped,
+            write_errors = counts.write_errors,
+            "engine observation writer drained"
+        );
+    }
     match stop {
         Stop::Signal => Ok(()),
         Stop::ClientUnhealthy(reason)
@@ -672,6 +703,7 @@ async fn start_engine_attempt(
     mode: runtime_cache::Mode,
     startup_deadline: Instant,
     cache_server: &mut Option<tokio::task::JoinHandle<io::Result<()>>>,
+    observations: Option<&EngineObservations>,
 ) -> Result<(ManagedEngine, EngineCoreClient, Option<PreparedTokenizer>), EngineStartupFailure> {
     let (engine, engine_protocol, handshake_port, prepared_tokenizer) =
         spawn_engine_attempt(config, cache, profiling, mode, startup_deadline).await?;
@@ -691,9 +723,28 @@ async fn start_engine_attempt(
             "EngineCore startup deadline elapsed before client connection",
         )));
     }
+    // Keep Llm and its dispatcher unchanged; only opt-in observations insert a local frame relay.
+    let handshake_address = format!("tcp://{advertised_host}:{handshake_port}");
+    let handshake_address = if let Some(observations) = observations {
+        if !matches!(engine_protocol, EngineCoreProtocol::V0_20) {
+            let _ = engine.shutdown(config.launch.drain_timeout()).await;
+            return Err(EngineStartupFailure::Other(io::Error::other(
+                "engine observations require audited vLLM 0.20 wire fields",
+            )));
+        }
+        match observations.relay(&handshake_address).await {
+            Ok(address) => address,
+            Err(error) => {
+                let _ = engine.shutdown(config.launch.drain_timeout()).await;
+                return Err(EngineStartupFailure::Other(error));
+            }
+        }
+    } else {
+        handshake_address
+    };
     let client_config = EngineCoreClientConfig {
         transport_mode: TransportMode::HandshakeOwner {
-            handshake_address: format!("tcp://{advertised_host}:{handshake_port}"),
+            handshake_address,
             advertised_host,
             engine_count: config.launch.parallelism.dp,
             ready_timeout,
@@ -722,6 +773,9 @@ async fn start_engine_attempt(
                 .shutdown(config.launch.drain_timeout())
                 .await
                 .map_err(|reason| EngineStartupFailure::Other(io::Error::other(reason)))?;
+            if let Some(observations) = observations {
+                observations.stop_relays().await;
+            }
             Err(error)
         }
     }
