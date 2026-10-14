@@ -26,6 +26,8 @@ use foretoken_model_server::shared_kv;
 use tokio::net::TcpListener;
 use tokio::sync::Notify;
 use tracing::{error, info, warn};
+
+mod experimental_api_listener;
 use vllm_engine_core_client::{
     EngineCoreClient, EngineCoreClientConfig, EngineCoreProtocol, TransportMode,
 };
@@ -54,6 +56,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Resolve the controller-owned launch plan before starting any engine or network task.
+    let socket_experiment = experimental_api_listener::Mode::from_env()?;
     let config = RuntimeConfig::from_env().map_err(std::io::Error::other)?;
     let observation_config = serde_json::json!({
         "block_size": {"value": config.launch.engine_args.get("block-size"), "source": "config"},
@@ -288,6 +291,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(cache_config) = cache_config {
         app_state = app_state.with_runtime_cache(cache_config);
     }
+    let (listener, mut socket_failure) =
+        experimental_api_listener::Listener::new(listener, socket_experiment);
     let mut server = Box::pin(
         axum::serve(
             listener,
@@ -310,6 +315,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Profiling(String),
     }
     let stop = tokio::select! {
+        Some(error) = socket_failure.recv() => Stop::Server(format!("API socket experiment failed: {error}")),
         () = shutdown_signal() => Stop::Signal,
         changed = client_health.changed() => {
             if changed.is_err() || !*client_health.borrow() {
